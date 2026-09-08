@@ -3,6 +3,9 @@ from datetime import datetime, timedelta
 from passlib.context import CryptContext
 from jose import jwt
 from dotenv import load_dotenv
+from fastapi import Request, HTTPException, status
+from app.database import get_db
+
 
 load_dotenv()
 
@@ -35,8 +38,6 @@ def create_access_token(data: dict) -> str:
     # Tokeni imzalayırıq
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
-  from fastapi import Request, HTTPException, status
-from app.database import get_db
 
 def get_current_user(request: Request):
     """HttpOnly Cookie-dən tokeni oxuyur və istifadəçini təsdiqləyir (Auth Guard)"""
