@@ -3,3 +3,7 @@ uvicorn[standard]
 pydantic
 supabase
 python-dotenv
+passlib[bcrypt]
+bcrypt
+python-jose[cryptography]
+PyJWT
