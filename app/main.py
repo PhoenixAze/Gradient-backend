@@ -17,7 +17,8 @@ ALLOWED_ORIGINS = [
     "http://localhost:5500",
     "http://localhost:8158",
     "https://gradient.az",
-    "https://www.gradient.az"
+    "https://www.gradient.az",
+    "https://phoenixaze.github.io"  # <--- BURA ƏLAVƏ EDİLDİ
 ]
 
 app.add_middleware(
