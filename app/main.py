@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import auth
+from app.routers import auth
 
 app = FastAPI(
     title="Gradient EdTech API",
@@ -30,7 +30,13 @@ app.add_middleware(
 
 # Router-ləri sistemə əlavə edirik
 app.include_router(auth.router)
+from app.routers import auth, users, exams # Importu yenilə
 
+# ... (əvvəlki kodlar) ...
+
+app.include_router(auth.router)
+app.include_router(users.router)   # YENİ
+app.include_router(exams.router)   # YENİ
 @app.get("/api/health")
 def health_check():
     """Serverin işlək vəziyyətdə olub-olmadığını yoxlamaq üçün endpoint."""
