@@ -1,8 +1,8 @@
 import os
 from fastapi import APIRouter, HTTPException, Response, status
-from app.schemas import UserRegisterRequest, UserLoginRequest, TokenResponse
-from app.database import get_db
-from app.security import get_password_hash, verify_password, create_access_token
+from schemas import UserRegisterRequest, UserLoginRequest, TokenResponse
+from database import get_db
+from security import get_password_hash, verify_password, create_access_token
 import uuid
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
