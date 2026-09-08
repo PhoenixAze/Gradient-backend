@@ -66,7 +66,7 @@ def login_user(credentials: UserLoginRequest, response: Response):
     if len(user_res.data) == 0:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, 
-            detail="İstifadəçi adı və ya şifrə yanlışdır." # Təhlükəsizlik: Hansının səhv olduğunu bildirmirik (Brute-force qarşısı)
+            detail="İstifadəçi adı və ya şifrə yanlışdır."
         )
         
     user = user_res.data[0]
@@ -83,13 +83,14 @@ def login_user(credentials: UserLoginRequest, response: Response):
     access_token = create_access_token(data=token_data)
     
     # 4. HttpOnly Cookie təyin et (XSS Müdafiəsi)
+    # DÜZƏLİŞ: Fərqli domenlər (GitHub Pages və Render) üçün SameSite="none" olmalıdır!
     response.set_cookie(
         key="access_token",
         value=f"Bearer {access_token}",
         httponly=True,
-        secure=IS_PRODUCTION, # Production-da mütləq True olacaq
-        samesite="lax" if not IS_PRODUCTION else "strict", # Localhost üçün lax, production üçün strict
-        max_age=60 * 24 * 7 * 60 # 7 gün (saniyə ilə)
+        secure=True,         # Mütləq True olmalıdır (HTTPS tələb edir)
+        samesite="none",     # Fərqli domenlər arasında cookie göndərmək üçün
+        max_age=60 * 24 * 7 * 60
     )
     
     return TokenResponse(message="Giriş uğurludur.", role=user["role"])
