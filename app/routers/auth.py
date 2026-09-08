@@ -13,44 +13,49 @@ IS_PRODUCTION = os.getenv("ENVIRONMENT") == "production"
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 def register_user(user_data: UserRegisterRequest):
-    db = get_db()
-    
-    # 1. İstifadəçinin mövcudluğunu yoxla (Zero-Trust)
-    existing_user = db.table("users").select("id").eq("identifier", user_data.identifier).execute()
-    if len(existing_user.data) > 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, 
-            detail="Bu E-poçt və ya Mobil nömrə artıq qeydiyyatdan keçib."
-        )
-    
-    # 2. Parolu Hash-lə
-    hashed_pw = get_password_hash(user_data.password)
-    
-    # 3. Bazaya yazılacaq məlumatları hazırla
-    new_user = {
-        "id": str(uuid.uuid4()),
-        "role": user_data.role,
-        "first_name": user_data.first_name,
-        "last_name": user_data.last_name,
-        "identifier": user_data.identifier,
-        "password_hash": hashed_pw,
-        "grade": user_data.grade,
-        "subject": user_data.subject,
-        "balance": 0.00
-    }
-    
-    # 4. Supabase-ə insert et (service_role ilə)
     try:
+        db = get_db()
+        
+        # 1. İstifadəçinin mövcudluğunu yoxla (Zero-Trust)
+        existing_user = db.table("users").select("id").eq("identifier", user_data.identifier).execute()
+        if len(existing_user.data) > 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, 
+                detail="Bu E-poçt və ya Mobil nömrə artıq qeydiyyatdan keçib."
+            )
+        
+        # 2. Parolu Hash-lə
+        hashed_pw = get_password_hash(user_data.password)
+        
+        # 3. Bazaya yazılacaq məlumatları hazırla
+        new_user = {
+            "id": str(uuid.uuid4()),
+            "role": user_data.role,
+            "first_name": user_data.first_name,
+            "last_name": user_data.last_name,
+            "identifier": user_data.identifier,
+            "password_hash": hashed_pw,
+            "grade": user_data.grade,
+            "subject": user_data.subject,
+            "balance": 0.00
+        }
+        
+        # 4. Supabase-ə insert et
         db.table("users").insert(new_user).execute()
+        
+        return {"message": "Qeydiyyat uğurla tamamlandı."}
+        
+    except HTTPException:
+        # Əgər bizim bilərəkdən verdiyimiz xətadırsa (məs: nömrə mövcuddur), olduğu kimi qaytar
+        raise 
     except Exception as e:
-        # Təhlükəsizlik Qeydi: Daxili baza xətasını frontend-ə sızdırmırıq.
-        print(f"DB Insert Error: {e}")
+        # TƏHLÜKƏSİZLİK VƏ DİAQNOSTİKA: Serverin çökməsinin qarşısını alırıq
+        print(f"CRITICAL REGISTER ERROR: {e}")
+        # Müvəqqəti olaraq əsl xətanı frontend-ə göndəririk ki, problemi görək
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail="Sistem xətası baş verdi. Zəhmət olmasa sonra yenidən cəhd edin."
+            detail=f"Sistem xətası: {str(e)}"
         )
-        
-    return {"message": "Qeydiyyat uğurla tamamlandı."}
 
 @router.post("/login", response_model=TokenResponse)
 def login_user(credentials: UserLoginRequest, response: Response):
