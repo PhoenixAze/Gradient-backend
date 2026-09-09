@@ -25,7 +25,7 @@ def start_exam(exam_id: str, current_user: dict = Depends(get_current_user)):
     if len(check_res.data) > 0:
         raise HTTPException(status_code=403, detail="Siz artıq bu sınağı işləmisiniz. Yenidən cəhd edə bilməzsiniz.")
 
-    exam_res = db.table("exams").select("id, title, question_count, questions").eq("id", exam_id).execute()
+    exam_res = db.table("exams").select("id, title, question_count, duration_minutes, questions").eq("id", exam_id).execute()
     if len(exam_res.data) == 0:
         raise HTTPException(status_code=404, detail="Sınaq tapılmadı.")
         
