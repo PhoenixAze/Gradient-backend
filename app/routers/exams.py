@@ -13,8 +13,25 @@ class ExamSubmitRequest(BaseModel):
 @router.get("/")
 def get_all_exams(current_user: dict = Depends(get_current_user)):
     db = get_db()
-    exams_res = db.table("exams").select("id, title, subject, price, question_count, created_at").order("created_at", desc=True).execute()
-    return exams_res.data
+    
+    # 1. Bütün sınaqları gətiririk (duration_minutes sütunu əlavə edildi)
+    exams_res = db.table("exams").select(
+        "id, title, subject, price, question_count, duration_minutes, created_at"
+    ).order("created_at", desc=True).execute()
+    
+    exams = exams_res.data
+
+    # 2. Cari istifadəçinin bitirdiyi sınaqların ID-lərini gətiririk (Zero-Trust)
+    results_res = db.table("exam_results").select("exam_id").eq("student_id", current_user["id"]).execute()
+    
+    # Sürətli axtarış üçün bitmiş sınaqların ID-lərini bir Set-ə (çoxluğa) yığırıq
+    completed_exam_ids = {res["exam_id"] for res in results_res.data}
+
+    # 3. Hər bir sınaq üçün is_completed statusunu təyin edirik
+    for exam in exams:
+        exam["is_completed"] = exam["id"] in completed_exam_ids
+
+    return exams
 
 @router.get("/{exam_id}/start")
 def start_exam(exam_id: str, current_user: dict = Depends(get_current_user)):
@@ -32,7 +49,7 @@ def start_exam(exam_id: str, current_user: dict = Depends(get_current_user)):
     exam_data = exam_res.data[0]
     questions = exam_data.get("questions", [])
     
-    # Düzgün cavabları silirik
+    # TƏHLÜKƏSİZLİK: Düzgün cavabları frontend-ə getmədən əvvəl silirik (Data Sanitization)
     safe_questions = []
     for q in questions:
         safe_q = {
@@ -64,6 +81,7 @@ def submit_exam(exam_id: str, payload: ExamSubmitRequest, current_user: dict = D
     correct_count = 0
     user_answers = payload.answers
     
+    # TƏHLÜKƏSİZLİK: Cavabları server tərəfində yoxlayırıq
     for q in questions:
         q_id = str(q.get("q_id"))
         correct_ans = q.get("correct_answer")
