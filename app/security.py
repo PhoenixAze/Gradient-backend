@@ -55,7 +55,8 @@ def get_current_user(request: Request):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Keçərsiz token.")
             
         db = get_db()
-        user_res = db.table("users").select("id, role, first_name, last_name, balance").eq("id", user_id).execute()
+        # YENİLƏNDİ: tutor_id əlavə edildi
+        user_res = db.table("users").select("id, role, first_name, last_name, balance, tutor_id").eq("id", user_id).execute()
         
         if len(user_res.data) == 0:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="İstifadəçi tapılmadı.")
