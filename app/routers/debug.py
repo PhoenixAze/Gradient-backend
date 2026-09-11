@@ -1,5 +1,5 @@
 import os
-from fastapi import APIRouter, HTTPException, Security, status
+from fastapi import APIRouter, HTTPException, Security, status, Depends
 from fastapi.security.api_key import APIKeyHeader
 from app.database import get_db
 from dotenv import load_dotenv
