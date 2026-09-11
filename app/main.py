@@ -24,9 +24,9 @@ ALLOWED_ORIGINS = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True, # Cookie-lərin (HttpOnly) gedib-gəlməsi üçün mütləq True olmalıdır
+    allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "Accept"],
+    allow_headers=["Content-Type", "Authorization", "Accept", "X-Debug-Key"], # <--- BURA ƏLAVƏ EDİLDİ
 )
 
 # Router-ləri sistemə əlavə edirik
