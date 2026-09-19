@@ -31,14 +31,13 @@ app.add_middleware(
 
 # Router-ləri sistemə əlavə edirik
 app.include_router(auth.router)
-from app.routers import auth, users, exams, debug# Importu yenilə
-
-# ... (əvvəlki kodlar) ...
+from app.routers import auth, users, exams, debug, settings
 
 app.include_router(auth.router)
-app.include_router(users.router)   # YENİ
+app.include_router(users.router)
 app.include_router(exams.router)
-app.include_router(debug.router)# YENİ
+app.include_router(settings.router)
+app.include_router(debug.router)
 @app.get("/api/health")
 def health_check():
     """Serverin işlək vəziyyətdə olub-olmadığını yoxlamaq üçün endpoint."""

@@ -43,6 +43,43 @@ def get_all_exams(current_user: dict = Depends(get_current_user)):
 
     return exams
 
+@router.post("/{exam_id}/purchase")
+def purchase_exam(exam_id: str, current_user: dict = Depends(get_current_user)):
+    """Pullu sınağın satın alınması (Zero-Trust balans yoxlanışı)."""
+    db = get_db()
+    
+    # 1. Sınağı əldə edirik
+    exam_res = db.table("exams").select("id, price").eq("id", exam_id).execute()
+    if not exam_res.data:
+        raise HTTPException(status_code=404, detail="Sınaq tapılmadı.")
+    
+    exam = exam_res.data[0]
+    price = float(exam.get("price", 0))
+    
+    # Pulsuz sınaq üçün ödəniş tələb olunmur
+    if price <= 0:
+        return {"success": True, "message": "Sınaq pulsuzdur."}
+        
+    # 2. İstifadəçinin ən son balansını bazadan yoxlayırıq (Sıfır Etibar)
+    user_res = db.table("profiles").select("id, balance").eq("id", current_user["id"]).execute()
+    if not user_res.data:
+        raise HTTPException(status_code=404, detail="İstifadəçi profili tapılmadı.")
+        
+    user_profile = user_res.data[0]
+    current_balance = float(user_profile.get("balance", 0))
+    
+    if current_balance < price:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail="Balansınız kifayət etmir. Zəhmət olmasa balansı artırın."
+        )
+        
+    # 3. Balansı çıxırıq və yeniləyirik
+    new_balance = round(current_balance - price, 2)
+    db.table("profiles").update({"balance": new_balance}).eq("id", current_user["id"]).execute()
+    
+    return {"success": True, "new_balance": new_balance, "message": "Sınaq uğurla satın alındı."}
+
 @router.get("/{exam_id}/start")
 def start_exam(exam_id: str, current_user: dict = Depends(get_current_user)):
     db = get_db()
