@@ -5,6 +5,7 @@ from app.database import get_db
 from app.security import (
     get_password_hash, verify_password, 
     create_access_token, create_refresh_token, 
+    ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_DAYS,
     SECRET_KEY, ALGORITHM
 )
 from jose import jwt
@@ -56,24 +57,26 @@ def login_user(credentials: UserLoginRequest, response: Response):
     access_token = create_access_token(data=token_data)
     refresh_token = create_refresh_token(data=token_data)
     
-    # Access Token (15 dəqiqə)
+    # Access Token (30 dəqiqə)
     response.set_cookie(
         key="access_token",
         value=f"Bearer {access_token}",
         httponly=True,
         secure=True,
         samesite="none",
-        max_age=15 * 60
+        path="/",
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60
     )
     
-    # Refresh Token (7 gün) - Brauzer bağlananda silinməməsi üçün max_age dəqiq verilir
+    # Refresh Token (30 gün) - Brauzer bağlansa belə istifadəçi sistemdə qalsın
     response.set_cookie(
         key="refresh_token",
         value=f"Bearer {refresh_token}",
         httponly=True,
         secure=True,
         samesite="none",
-        max_age=7 * 24 * 60 * 60
+        path="/",
+        max_age=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
     )
     
     return TokenResponse(message="Giriş uğurludur.", role=user["role"])
@@ -98,12 +101,14 @@ def refresh_token(request: Request, response: Response):
         
         # Zero-Trust: İstifadəçinin hələ də bazada aktiv olduğunu yoxlayırıq
         db = get_db()
-        user_res = db.table("users").select("id").eq("id", user_id).execute()
+        user_res = db.table("users").select("id, role, first_name, last_name, balance").eq("id", user_id).execute()
         if len(user_res.data) == 0:
             raise HTTPException(status_code=401, detail="İstifadəçi tapılmadı və ya silinib.")
             
-        # Yeni Access Token yaradırıq
-        new_access_token = create_access_token(data={"sub": user_id, "role": role})
+        user = user_res.data[0]
+        # Yeni Access Token və uzadılmış Refresh Token yaradırıq (Sliding session)
+        new_access_token = create_access_token(data={"sub": user["id"], "role": user["role"]})
+        new_refresh_token = create_refresh_token(data={"sub": user["id"], "role": user["role"]})
         
         response.set_cookie(
             key="access_token",
@@ -111,9 +116,19 @@ def refresh_token(request: Request, response: Response):
             httponly=True,
             secure=True,
             samesite="none",
-            max_age=15 * 60
+            path="/",
+            max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60
         )
-        return {"message": "Token uğurla yeniləndi."}
+        response.set_cookie(
+            key="refresh_token",
+            value=f"Bearer {new_refresh_token}",
+            httponly=True,
+            secure=True,
+            samesite="none",
+            path="/",
+            max_age=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
+        )
+        return {"message": "Token uğurla yeniləndi.", "role": user["role"]}
         
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Sessiyanın vaxtı tamamilə bitib. Yenidən giriş edin.")
@@ -123,6 +138,6 @@ def refresh_token(request: Request, response: Response):
 @router.post("/logout")
 def logout_user(response: Response):
     """Hər iki tokeni silir"""
-    response.delete_cookie(key="access_token", httponly=True, secure=True, samesite="none")
-    response.delete_cookie(key="refresh_token", httponly=True, secure=True, samesite="none")
+    response.delete_cookie(key="access_token", path="/", httponly=True, secure=True, samesite="none")
+    response.delete_cookie(key="refresh_token", path="/", httponly=True, secure=True, samesite="none")
     return {"message": "Uğurla çıxış edildi."}

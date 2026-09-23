@@ -13,8 +13,8 @@ if not SECRET_KEY:
     raise ValueError("CRITICAL ERROR: JWT_SECRET_KEY tapılmadı!")
 
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 15  # Qısa ömürlü (15 dəqiqə)
-REFRESH_TOKEN_EXPIRE_DAYS = 7     # Uzun ömürlü (7 gün)
+ACCESS_TOKEN_EXPIRE_MINUTES = 30  # 30 dəqiqə
+REFRESH_TOKEN_EXPIRE_DAYS = 30    # 30 gün (istifadəçinin təkrar giriş etmədən rahat qalması üçün)
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     password_bytes = plain_password.encode('utf-8')
