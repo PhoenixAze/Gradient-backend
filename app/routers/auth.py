@@ -24,6 +24,15 @@ def register_user(user_data: UserRegisterRequest):
             raise HTTPException(status_code=400, detail="Bu E-poçt və ya Mobil nömrə artıq qeydiyyatdan keçib.")
         
         hashed_pw = get_password_hash(user_data.password)
+        tutor_id = None
+        if user_data.role == "student" and user_data.tutor_code:
+            code = user_data.tutor_code.strip()
+            t_res = db.table("users").select("id").eq("identifier", code).eq("role", "tutor").execute()
+            if not t_res.data:
+                t_res = db.table("users").select("id").eq("id", code).eq("role", "tutor").execute()
+            if t_res.data:
+                tutor_id = t_res.data[0]["id"]
+
         new_user = {
             "id": str(uuid.uuid4()),
             "role": user_data.role,
@@ -33,7 +42,8 @@ def register_user(user_data: UserRegisterRequest):
             "password_hash": hashed_pw,
             "grade": user_data.grade,
             "subject": user_data.subject,
-            "balance": 0.00
+            "balance": 0.00,
+            "tutor_id": tutor_id
         }
         db.table("users").insert(new_user).execute()
         return {"message": "Qeydiyyat uğurla tamamlandı."}

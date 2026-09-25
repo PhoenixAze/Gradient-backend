@@ -61,7 +61,7 @@ def purchase_exam(exam_id: str, current_user: dict = Depends(get_current_user)):
         return {"success": True, "message": "Sınaq pulsuzdur."}
         
     # 2. İstifadəçinin ən son balansını bazadan yoxlayırıq (Sıfır Etibar)
-    user_res = db.table("profiles").select("id, balance").eq("id", current_user["id"]).execute()
+    user_res = db.table("users").select("id, balance").eq("id", current_user["id"]).execute()
     if not user_res.data:
         raise HTTPException(status_code=404, detail="İstifadəçi profili tapılmadı.")
         
@@ -76,7 +76,7 @@ def purchase_exam(exam_id: str, current_user: dict = Depends(get_current_user)):
         
     # 3. Balansı çıxırıq və yeniləyirik
     new_balance = round(current_balance - price, 2)
-    db.table("profiles").update({"balance": new_balance}).eq("id", current_user["id"]).execute()
+    db.table("users").update({"balance": new_balance}).eq("id", current_user["id"]).execute()
     
     return {"success": True, "new_balance": new_balance, "message": "Sınaq uğurla satın alındı."}
 

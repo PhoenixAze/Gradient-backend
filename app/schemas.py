@@ -11,6 +11,7 @@ class UserRegisterRequest(BaseModel):
     password: str = Field(..., min_length=8, max_length=128, description="Minimum 8 simvol")
     grade: Optional[str] = Field(None, max_length=20)
     subject: Optional[str] = Field(None, max_length=50)
+    tutor_code: Optional[str] = Field(None, max_length=100)
 
     @field_validator('identifier')
     @classmethod
