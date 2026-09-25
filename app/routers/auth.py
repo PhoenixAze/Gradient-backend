@@ -51,7 +51,7 @@ def register_user(user_data: UserRegisterRequest):
         raise 
     except Exception as e:
         print(f"CRITICAL REGISTER ERROR: {e}")
-        raise HTTPException(status_code=500, detail=f"Sistem xətası: {str(e)}")
+        raise HTTPException(status_code=500, detail="Qeydiyyat zamanı xəta baş verdi. Zəhmət olmasa bir az sonra yenidən cəhd edin.")
 
 @router.post("/login", response_model=TokenResponse)
 def login_user(credentials: UserLoginRequest, response: Response):

@@ -11,13 +11,16 @@ load_dotenv()
 router = APIRouter(prefix="/api/v1/debug", tags=["Debug"])
 
 # .env faylından gizli açarı oxuyuruq
-DEBUG_SECRET_KEY = os.getenv("DEBUG_SECRET_KEY", "menim_gizli_debug_acarim_123")
-api_key_header = APIKeyHeader(name="X-Debug-Key", auto_error=True)
+DEBUG_SECRET_KEY = os.getenv("DEBUG_SECRET_KEY")
+api_key_header = APIKeyHeader(name="X-Debug-Key", auto_error=False)
 
 def verify_debug_key(api_key: str = Security(api_key_header)):
-    if api_key != DEBUG_SECRET_KEY:
-        # YENİ: Botlara qarşı anti-bruteforce (kobud güc) qoruması.
-        # Səhv şifrə göndərəni 3 saniyə gözlədirik ki, botlar sistemi yora bilməsin.
+    if not DEBUG_SECRET_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Debug paneli deaktivdir."
+        )
+    if not api_key or api_key != DEBUG_SECRET_KEY:
         time.sleep(3)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -53,7 +56,7 @@ def check_user(payload: CheckUserRequest, api_key: str = Depends(verify_debug_ke
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Sistem xətası: {str(e)}")
+        raise HTTPException(status_code=500, detail="Daxili sistem xətası baş verdi.")
 
 @router.post("/update-balance")
 def update_user_balance(payload: BalanceUpdateRequest, api_key: str = Depends(verify_debug_key)):
@@ -71,7 +74,7 @@ def update_user_balance(payload: BalanceUpdateRequest, api_key: str = Depends(ve
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Sistem xətası: {str(e)}")
+        raise HTTPException(status_code=500, detail="Daxili sistem xətası baş verdi.")
 
 @router.get("/stats")
 def get_system_stats(api_key: str = Depends(verify_debug_key)):
@@ -110,5 +113,5 @@ def get_system_stats(api_key: str = Depends(verify_debug_key)):
         return {
             "status": "offline",
             "database": "error",
-            "error_detail": str(e)
+            "message": "Verilənlər bazası ilə əlaqə qurmaq mümkün olmadı."
         }
