@@ -111,7 +111,7 @@ def refresh_token(request: Request, response: Response):
         
         # Zero-Trust: İstifadəçinin hələ də bazada aktiv olduğunu yoxlayırıq
         db = get_db()
-        user_res = db.table("users").select("id, role, first_name, last_name, balance").eq("id", user_id).execute()
+        user_res = db.table("users").select("id, role, first_name, last_name, identifier, grade, subject, balance, tutor_id").eq("id", user_id).execute()
         if len(user_res.data) == 0:
             raise HTTPException(status_code=401, detail="İstifadəçi tapılmadı və ya silinib.")
             

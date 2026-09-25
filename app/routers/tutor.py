@@ -136,8 +136,8 @@ def get_tutor_dashboard(current_user: dict = Depends(get_current_user)):
             "first_name": current_user.get("first_name", ""),
             "last_name": current_user.get("last_name", ""),
             "identifier": current_user.get("identifier", ""),
-            "subject": current_user.get("subject", "Ümumi"),
-            "invite_code": current_user.get("identifier", "") # Şagirdlər e-poçt və ya nömrə ilə qoşulur
+            "subject": current_user.get("subject") or "Ümumi",
+            "invite_code": current_user.get("identifier") or tutor_id
         },
         "stats": {
             "total_students": len(students),
