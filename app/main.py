@@ -28,7 +28,7 @@ app.add_middleware(
     allow_origin_regex=r"https:\/\/ais-(dev|pre)-.*\.run\.app",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "Accept", "X-Debug-Key"],
+    allow_headers=["Content-Type", "Authorization", "Accept", "X-Debug-Key", "x-refresh-token"],
 )
 
 # Router-ləri sistemə əlavə edirik

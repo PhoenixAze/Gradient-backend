@@ -45,7 +45,10 @@ class UserLoginRequest(BaseModel):
     password: str = Field(..., min_length=8)
 
 class TokenResponse(BaseModel):
-    # Frontend-ə yalnız mesaj qaytaracağıq, token HttpOnly cookie-də gedəcək.
-    # Lakin gələcəkdə bəzi meta-dataları (məs: user_role) qaytarmaq üçün bu schema lazımdır.
+    # Həm HttpOnly cookie, həm də Cross-Site / Safari / Mobile mühitləri üçün JSON token fallback
     message: str
     role: str
+    access_token: Optional[str] = None
+    refresh_token: Optional[str] = None
+    token_type: Optional[str] = "bearer"
+    user: Optional[dict] = None

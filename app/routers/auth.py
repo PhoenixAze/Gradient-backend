@@ -89,17 +89,31 @@ def login_user(credentials: UserLoginRequest, response: Response):
         max_age=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
     )
     
-    return TokenResponse(message="Giriş uğurludur.", role=user["role"])
+    return TokenResponse(
+        message="Giriş uğurludur.",
+        role=user["role"],
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_type="bearer",
+        user={
+            "id": user["id"],
+            "first_name": user.get("first_name"),
+            "last_name": user.get("last_name"),
+            "identifier": user.get("identifier"),
+            "role": user.get("role"),
+            "grade": user.get("grade"),
+            "subject": user.get("subject")
+        }
+    )
 
 @router.post("/refresh")
 def refresh_token(request: Request, response: Response):
     """Vaxtı bitmiş access_token-i yeniləyir"""
     token = request.cookies.get("refresh_token")
-    
+    if not token:
+        token = request.headers.get("x-refresh-token") or request.headers.get("authorization") or request.headers.get("Authorization")
     if not token:
         raise HTTPException(status_code=401, detail="Refresh token tapılmadı. Yenidən giriş edin.")
-        
-    try:
         token = token.split(" ")[1] if " " in token else token
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         
@@ -138,7 +152,20 @@ def refresh_token(request: Request, response: Response):
             path="/",
             max_age=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
         )
-        return {"message": "Token uğurla yeniləndi.", "role": user["role"]}
+        return {
+            "message": "Token uğurla yeniləndi.",
+            "role": user["role"],
+            "access_token": new_access_token,
+            "refresh_token": new_refresh_token,
+            "token_type": "bearer",
+            "user": {
+                "id": user["id"],
+                "first_name": user.get("first_name"),
+                "last_name": user.get("last_name"),
+                "identifier": user.get("identifier"),
+                "role": user.get("role")
+            }
+        }
         
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Sessiyanın vaxtı tamamilə bitib. Yenidən giriş edin.")
