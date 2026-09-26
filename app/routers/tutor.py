@@ -2,13 +2,16 @@
 import os
 import re
 import json
+import zlib
+import uuid
 import urllib.request
 import urllib.error
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from app.database import get_db
-from app.security import get_current_user
+from app.security import get_current_user, get_password_hash, verify_password
 
 router = APIRouter(prefix="/api/v1/tutor", tags=["Tutor"])
 
@@ -235,6 +238,9 @@ def get_tutor_dashboard(current_user: dict = Depends(get_current_user)):
             "lowest_score": es["lowest_score"]
         })
 
+    tutor_code_4digit = get_or_create_4digit_code(current_user, db)
+    pending_reqs = _get_tutor_requests_for_tutor(tutor_id, db)
+
     return {
         "tutor": {
             "id": tutor_id,
@@ -242,8 +248,11 @@ def get_tutor_dashboard(current_user: dict = Depends(get_current_user)):
             "last_name": current_user.get("last_name", ""),
             "identifier": current_user.get("identifier", ""),
             "subject": current_user.get("subject") or "Ümumi",
-            "invite_code": current_user.get("identifier") or tutor_id
+            "tutor_code": tutor_code_4digit,
+            "invite_code": tutor_code_4digit
         },
+        "pending_requests_count": len(pending_reqs),
+        "pending_requests": pending_reqs,
         "stats": {
             "total_students": len(students),
             "active_students": active_students_count,
@@ -383,26 +392,366 @@ def remove_student_from_group(student_id: str, current_user: dict = Depends(get_
     db.table("users").update({"tutor_id": None}).eq("id", student_id).eq("tutor_id", current_user["id"]).execute()
     return {"success": True, "message": "Şagird qrupdan çıxarıldı."}
 
-@router.post("/join")
-def student_join_tutor(payload: JoinTutorPayload, current_user: dict = Depends(get_current_user)):
-    """Şagird repetitor kodu (e-poçt və ya id) ilə repetitora qoşulur."""
+def get_or_create_4digit_code(tutor: dict, db=None) -> str:
+    """
+    Repetitor üçün unikal 4 rəqəmli sistem kodu təyin edir və ya mövcud olanı qaytarır.
+    Format: 1000 - 9999 arası unikal 4 rəqəm (məs: 4829).
+    """
+    code = tutor.get("tutor_code") or tutor.get("invite_code")
+    if code:
+        s = str(code).strip()
+        if len(s) == 4 and s.isdigit():
+            return s
+
+    tutor_id_str = str(tutor.get("id") or tutor.get("identifier") or "tutor")
+    computed = str((zlib.crc32(tutor_id_str.encode("utf-8")) % 9000) + 1000)
+
+    if db and tutor.get("id"):
+        try:
+            db.table("users").update({"tutor_code": computed}).eq("id", tutor["id"]).execute()
+        except Exception:
+            pass
+
+    return computed
+
+def find_tutor_by_code_or_identifier(code: str, db):
+    clean_code = code.strip()
+    if not clean_code:
+        return None
+
+    # 1. tutor_code sütunu ilə axtarış
+    try:
+        res = db.table("users").select("*").eq("tutor_code", clean_code).execute()
+        if res.data:
+            for t in res.data:
+                role = str(t.get("role", "")).lower()
+                if role in ["tutor", "teacher", "repetitor", "admin", "instructor"]:
+                    return t
+    except Exception:
+        pass
+
+    # 2. identifier (email/telefon) və ya id ilə axtarış
+    try:
+        res = db.table("users").select("*").eq("identifier", clean_code).execute()
+        if res.data:
+            for t in res.data:
+                role = str(t.get("role", "")).lower()
+                if role in ["tutor", "teacher", "repetitor", "admin", "instructor"]:
+                    return t
+    except Exception:
+        pass
+
+    try:
+        res = db.table("users").select("*").eq("id", clean_code).execute()
+        if res.data:
+            for t in res.data:
+                role = str(t.get("role", "")).lower()
+                if role in ["tutor", "teacher", "repetitor", "admin", "instructor"]:
+                    return t
+    except Exception:
+        pass
+
+    # 3. Bütün repetitorlar üzərindən deterministik 4 rəqəmli kod yoxlanışı
+    try:
+        tutors_res = db.table("users").select("*").in_("role", ["tutor", "teacher", "repetitor", "admin"]).execute()
+        tutors = tutors_res.data or []
+        for t in tutors:
+            if get_or_create_4digit_code(t, db) == clean_code:
+                return t
+    except Exception:
+        pass
+
+    return None
+
+# Yaddaşda və bazada saxlanan qoşulma istəkləri (Zero-Trust fallback)
+_in_memory_requests: Dict[str, dict] = {}
+
+def _insert_tutor_request(req_obj: dict, db):
+    req_id = req_obj["id"]
+    _in_memory_requests[req_id] = req_obj
+    try:
+        db.table("tutor_requests").insert(req_obj).execute()
+    except Exception as e:
+        print(f"Supabase tutor_requests insert note (in-memory used): {e}")
+
+def _get_tutor_requests_for_tutor(tutor_id: str, db):
+    items = []
+    try:
+        res = db.table("tutor_requests").select("*").eq("tutor_id", tutor_id).eq("status", "pending").order("created_at", desc=True).execute()
+        if res.data:
+            items = res.data
+    except Exception:
+        pass
+
+    seen_ids = {item["id"] for item in items}
+    for item in _in_memory_requests.values():
+        if item.get("tutor_id") == tutor_id and item.get("status") == "pending" and item["id"] not in seen_ids:
+            items.append(item)
+    return items
+
+def _get_pending_request_for_student(student_id: str, db):
+    try:
+        res = db.table("tutor_requests").select("*").eq("student_id", student_id).eq("status", "pending").order("created_at", desc=True).limit(1).execute()
+        if res.data:
+            return res.data[0]
+    except Exception:
+        pass
+
+    for item in _in_memory_requests.values():
+        if item.get("student_id") == student_id and item.get("status") == "pending":
+            return item
+    return None
+
+def _find_request_by_id(req_id: str, db):
+    try:
+        res = db.table("tutor_requests").select("*").eq("id", req_id).execute()
+        if res.data:
+            return res.data[0]
+    except Exception:
+        pass
+    return _in_memory_requests.get(req_id)
+
+def _update_tutor_request_status(req_id: str, new_status: str, db):
+    if req_id in _in_memory_requests:
+        _in_memory_requests[req_id]["status"] = new_status
+        _in_memory_requests[req_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
+    try:
+        db.table("tutor_requests").update({"status": new_status, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", req_id).execute()
+    except Exception as e:
+        print(f"tutor_requests update note: {e}")
+
+# ============================================================================
+# ŞAGİRD VƏ REPETİTOR İSTƏK İDARƏETMƏSİ (JOIN REQUESTS)
+# ============================================================================
+class CreateTutorRequestPayload(BaseModel):
+    tutor_code: str = Field(..., min_length=1, max_length=50, strip_whitespace=True, description="Repetitorun 4 rəqəmli kodu")
+
+class UpdateTutorProfilePayload(BaseModel):
+    first_name: Optional[str] = Field(None, min_length=2, max_length=50)
+    last_name: Optional[str] = Field(None, min_length=2, max_length=50)
+    subject: Optional[str] = Field(None, max_length=50)
+    current_password: Optional[str] = None
+    new_password: Optional[str] = Field(None, min_length=8)
+
+@router.get("/requests")
+def get_tutor_requests(current_user: dict = Depends(get_current_user)):
+    """Repetitor üçün gözləyən bütün şagird qoşulma istəklərini qaytarır."""
+    db = get_db()
+    _ensure_tutor_role(current_user, db)
+    tutor_id = current_user["id"]
+    return _get_tutor_requests_for_tutor(tutor_id, db)
+
+@router.post("/requests")
+def create_student_join_request(payload: CreateTutorRequestPayload, current_user: dict = Depends(get_current_user)):
+    """Şagird 4 rəqəmli kod daxil edərək repetitora qoşulma istəyi göndərir."""
     db = get_db()
     code = payload.tutor_code.strip()
+    tutor = find_tutor_by_code_or_identifier(code, db)
 
-    tutor_res = db.table("users").select("id, first_name, last_name, subject, role").eq("identifier", code).execute()
-    if not tutor_res.data:
-        tutor_res = db.table("users").select("id, first_name, last_name, subject, role").eq("id", code).execute()
+    if not tutor:
+        raise HTTPException(status_code=404, detail="Daxil etdiyiniz 4 rəqəmli koda uyğun repetitor tapılmadı.")
 
-    if not tutor_res.data:
-        raise HTTPException(status_code=404, detail="Qeyd olunan kod və ya e-poçta uyğun repetitor tapılmadı.")
+    if tutor["id"] == current_user["id"]:
+        raise HTTPException(status_code=400, detail="Öz hesabınıza istək göndərə bilməzsiniz.")
 
-    tutor = tutor_res.data[0]
-    db.table("users").update({"tutor_id": tutor["id"]}).eq("id", current_user["id"]).execute()
+    if current_user.get("tutor_id") == tutor["id"]:
+        raise HTTPException(status_code=400, detail="Siz artıq bu repetitorun qrupundasınız.")
 
+    existing_req = _get_pending_request_for_student(current_user["id"], db)
+    if existing_req and existing_req.get("tutor_id") == tutor["id"]:
+        raise HTTPException(status_code=400, detail="Bu repetitora artıq göndərilmiş və gözləyən istəyiniz var.")
+
+    req_id = "req_" + str(uuid.uuid4()).replace("-", "")[:12]
+    req_obj = {
+        "id": req_id,
+        "student_id": current_user["id"],
+        "student_name": f"{current_user.get(first_name, )} {current_user.get(last_name, )}".strip() or "Şagird",
+        "student_identifier": current_user.get("identifier", ""),
+        "student_grade": str(current_user.get("grade") or "Məlum deyil"),
+        "tutor_id": tutor["id"],
+        "status": "pending",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+    _insert_tutor_request(req_obj, db)
+
+    tutor_full_name = f"{tutor.get(first_name, )} {tutor.get(last_name, )}".strip()
     return {
         "success": True,
-        "message": f"Siz uğurla {tutor['first_name']} {tutor['last_name']} müəllimin qrupuna qoşuldunuz.",
-        "tutor_name": f"{tutor['first_name']} {tutor['last_name']}",
+        "message": f"{tutor_full_name} müəllimə qoşulma istəyi göndərildi. Repetitor qəbul etdikdən sonra qrupa daxil olacaqsınız.",
+        "tutor_name": tutor_full_name,
+        "subject": tutor.get("subject", "Ümumi")
+    }
+
+@router.post("/requests/{request_id}/accept")
+def accept_tutor_request(request_id: str, current_user: dict = Depends(get_current_user)):
+    """Repetitor şagirdin qoşulma istəyini qəbul edir və qrupa əlavə edir."""
+    db = get_db()
+    _ensure_tutor_role(current_user, db)
+    tutor_id = current_user["id"]
+
+    req = _find_request_by_id(request_id, db)
+    if not req:
+        raise HTTPException(status_code=404, detail="Qoşulma istəyi tapılmadı.")
+
+    if req.get("tutor_id") != tutor_id:
+        raise HTTPException(status_code=403, detail="Bu istəyi idarə etmək səlahiyyətiniz yoxdur.")
+
+    student_id = req.get("student_id")
+    # Şagirdin tutor_id-sini təyin edirik
+    db.table("users").update({"tutor_id": tutor_id}).eq("id", student_id).execute()
+    _update_tutor_request_status(request_id, "accepted", db)
+
+    return {"success": True, "message": f"{req.get(student_name, Şagird)} uğurla qrupa qəbul edildi."}
+
+@router.post("/requests/{request_id}/reject")
+def reject_tutor_request(request_id: str, current_user: dict = Depends(get_current_user)):
+    """Repetitor şagirdin qoşulma istəyini rədd edir."""
+    db = get_db()
+    _ensure_tutor_role(current_user, db)
+    tutor_id = current_user["id"]
+
+    req = _find_request_by_id(request_id, db)
+    if not req:
+        raise HTTPException(status_code=404, detail="Qoşulma istəyi tapılmadı.")
+
+    if req.get("tutor_id") != tutor_id:
+        raise HTTPException(status_code=403, detail="Bu istəyi idarə etmək səlahiyyətiniz yoxdur.")
+
+    _update_tutor_request_status(request_id, "rejected", db)
+    return {"success": True, "message": "Şagirdin istəyi rədd edildi."}
+
+@router.get("/my-request")
+def get_student_tutor_status(current_user: dict = Depends(get_current_user)):
+    """Şagirdin cari repetitorunu və ya göndərilmiş gözləyən istəyini qaytarır."""
+    db = get_db()
+    student_tutor_id = current_user.get("tutor_id")
+
+    if student_tutor_id:
+        tutor_res = db.table("users").select("id, first_name, last_name, subject, identifier, tutor_code").eq("id", student_tutor_id).execute()
+        if tutor_res.data:
+            tutor = tutor_res.data[0]
+            t_code = get_or_create_4digit_code(tutor, db)
+            return {
+                "has_tutor": True,
+                "tutor": {
+                    "id": tutor["id"],
+                    "name": f"{tutor.get(first_name, )} {tutor.get(last_name, )}".strip(),
+                    "subject": tutor.get("subject", "Ümumi"),
+                    "code": t_code
+                },
+                "pending_request": None
+            }
+
+    pending_req = _get_pending_request_for_student(current_user["id"], db)
+    if pending_req:
+        tutor_res = db.table("users").select("id, first_name, last_name, subject, identifier, tutor_code").eq("id", pending_req["tutor_id"]).execute()
+        t_name = "Repetitor"
+        t_subj = "Ümumi"
+        if tutor_res.data:
+            t = tutor_res.data[0]
+            t_name = f"{t.get(first_name, )} {t.get(last_name, )}".strip()
+            t_subj = t.get("subject", "Ümumi")
+        return {
+            "has_tutor": False,
+            "tutor": None,
+            "pending_request": {
+                "id": pending_req["id"],
+                "tutor_name": t_name,
+                "subject": t_subj,
+                "created_at": pending_req.get("created_at")
+            }
+        }
+
+    return {
+        "has_tutor": False,
+        "tutor": None,
+        "pending_request": None
+    }
+
+@router.delete("/my-request")
+def cancel_student_tutor_request(current_user: dict = Depends(get_current_user)):
+    """Şagird göndərdiyi gözləyən qoşulma istəyini ləğv edir."""
+    db = get_db()
+    pending_req = _get_pending_request_for_student(current_user["id"], db)
+    if not pending_req:
+        raise HTTPException(status_code=404, detail="Aktiv gözləyən qoşulma istəyiniz tapılmadı.")
+
+    _update_tutor_request_status(pending_req["id"], "cancelled", db)
+    return {"success": True, "message": "Qoşulma istəyi ləğv edildi."}
+
+@router.post("/leave")
+def leave_tutor_group(current_user: dict = Depends(get_current_user)):
+    """Şagird cari repetitorunun qrupundan ayrılır."""
+    db = get_db()
+    if not current_user.get("tutor_id"):
+        raise HTTPException(status_code=400, detail="Siz heç bir repetitorun qrupunda deyilsiniz.")
+
+    db.table("users").update({"tutor_id": None}).eq("id", current_user["id"]).execute()
+    return {"success": True, "message": "Repetitor qrupundan ayrıldınız."}
+
+@router.get("/profile")
+def get_tutor_profile(current_user: dict = Depends(get_current_user)):
+    """Repetitor profil məlumatlarını və 4 rəqəmli kodunu qaytarır."""
+    db = get_db()
+    _ensure_tutor_role(current_user, db)
+    tutor_code = get_or_create_4digit_code(current_user, db)
+    students_res = db.table("users").select("id").eq("tutor_id", current_user["id"]).execute()
+    student_count = len(students_res.data or [])
+
+    return {
+        "id": current_user["id"],
+        "first_name": current_user.get("first_name", ""),
+        "last_name": current_user.get("last_name", ""),
+        "identifier": current_user.get("identifier", ""),
+        "subject": current_user.get("subject", "Ümumi"),
+        "tutor_code": tutor_code,
+        "invite_code": tutor_code,
+        "student_count": student_count,
+        "role": current_user.get("role", "tutor")
+    }
+
+@router.put("/profile")
+def update_tutor_profile(payload: UpdateTutorProfilePayload, current_user: dict = Depends(get_current_user)):
+    """Repetitor profil məlumatlarını və ya şifrəsini yeniləyir."""
+    db = get_db()
+    _ensure_tutor_role(current_user, db)
+    updates = {}
+
+    if payload.first_name:
+        updates["first_name"] = payload.first_name.strip()
+    if payload.last_name:
+        updates["last_name"] = payload.last_name.strip()
+    if payload.subject:
+        updates["subject"] = payload.subject.strip()
+
+    if payload.new_password:
+        if not payload.current_password:
+            raise HTTPException(status_code=400, detail="Şifrəni dəyişmək üçün cari şifrənizi daxil edin.")
+        user_res = db.table("users").select("password_hash").eq("id", current_user["id"]).execute()
+        if not user_res.data or not verify_password(payload.current_password, user_res.data[0]["password_hash"]):
+            raise HTTPException(status_code=400, detail="Cari şifrəniz yanlışdır.")
+        updates["password_hash"] = get_password_hash(payload.new_password)
+
+    if updates:
+        db.table("users").update(updates).eq("id", current_user["id"]).execute()
+
+    return {"success": True, "message": "Profil məlumatları uğurla yeniləndi."}
+
+@router.post("/join")
+def student_join_tutor(payload: JoinTutorPayload, current_user: dict = Depends(get_current_user)):
+    """Geriye uyğunluq üçün birbaşa qoşulma metodu."""
+    db = get_db()
+    code = payload.tutor_code.strip()
+    tutor = find_tutor_by_code_or_identifier(code, db)
+    if not tutor:
+        raise HTTPException(status_code=404, detail="Qeyd olunan 4 rəqəmli koda və ya e-poçta uyğun repetitor tapılmadı.")
+    tutor_full_name = f"{tutor.get(first_name, )} {tutor.get(last_name, )}".strip()
+    db.table("users").update({"tutor_id": tutor["id"]}).eq("id", current_user["id"]).execute()
+    return {
+        "success": True,
+        "message": f"Siz uğurla {tutor_full_name} müəllimin qrupuna qoşuldunuz.",
+        "tutor_name": tutor_full_name,
         "subject": tutor.get("subject")
     }
 
