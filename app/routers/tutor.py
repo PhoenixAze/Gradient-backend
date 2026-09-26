@@ -768,7 +768,7 @@ def _call_gemini_api(api_key: str, system_prompt: str, user_content: str, histor
         return None
 
     # Google Generative Language API rəsmi modelləri
-    models = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-flash-latest"]
+    models = ["gemini-3.8-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash"]
     
     contents = []
     last_role = None
@@ -967,19 +967,35 @@ def tutor_ai_query(payload: TutorAIQueryRequest, current_user: dict = Depends(ge
     question = payload.question.strip()
 
     # 1. Repetitorun real şagirdlərini gətiririk
-    students_res = db.table("users").select(
-        "id, first_name, last_name, identifier, grade, created_at"
-    ).eq("tutor_id", tutor_id).execute()
-    students = students_res.data or []
+    students = []
+    try:
+        students_res = db.table("users").select(
+            "id, first_name, last_name, identifier, grade, created_at"
+        ).eq("tutor_id", tutor_id).execute()
+        students = students_res.data or []
+    except Exception as e:
+        print(f"Error fetching students in tutor_ai_query: {e}")
+        students = []
+
     student_ids = [s["id"] for s in students]
 
     # 2. Şagirdlərin bütün sınaq nəticələri
     all_results = []
     if student_ids:
-        results_res = db.table("exam_results").select(
-            "id, student_id, exam_id, score, total_questions, created_at, incorrect_count, empty_count, weak_topics"
-        ).in_("student_id", student_ids).order("created_at", desc=True).execute()
-        all_results = results_res.data or []
+        try:
+            results_res = db.table("exam_results").select(
+                "id, student_id, exam_id, score, total_questions, created_at, incorrect_count, empty_count, weak_topics"
+            ).in_("student_id", student_ids).order("created_at", desc=True).execute()
+            all_results = results_res.data or []
+        except Exception:
+            try:
+                results_res = db.table("exam_results").select(
+                    "id, student_id, exam_id, score, total_questions, created_at"
+                ).in_("student_id", student_ids).order("created_at", desc=True).execute()
+                all_results = results_res.data or []
+            except Exception as e:
+                print(f"Error fetching exam_results in tutor_ai_query: {e}")
+                all_results = []
 
     # 3. Sınaqlar barədə məlumatlar
     exam_ids = list(set([r["exam_id"] for r in all_results if r.get("exam_id")]))
