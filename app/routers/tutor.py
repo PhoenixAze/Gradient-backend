@@ -780,3 +780,362 @@ def tutor_ai_query(payload: TutorAIQueryRequest, current_user: dict = Depends(ge
         "answer": natural_answer,
         "source": "conversational_engine"
     }
+
+
+import uuid
+from datetime import datetime, timezone
+
+# ============================================================================
+# FERDI SINAQ TEYINI VE CAVAB KARTLARI (TUTOR ASSIGNMENTS & ANSWER SHEETS)
+# ============================================================================
+
+class CreateAssignmentPayload(BaseModel):
+    title: str = Field(..., min_length=1, max_length=255, description="Sınağın adı")
+    course_id: Optional[str] = Field(default=None, description="Kurs ID")
+    pdf_url: str = Field(..., description="PDF faylın URL-i və ya data-URI")
+    answer_key: Dict[str, str] = Field(..., description="Müəllimin təyin etdiyi düzgün cavablar kartı")
+    question_count: int = Field(..., ge=1, le=150, description="Sual sayı")
+    duration_minutes: int = Field(default=60, ge=1, le=360, description="Sınaq müddəti")
+
+class AssignmentSubmitPayload(BaseModel):
+    answers: Dict[str, str] = Field(..., description="Şagirdin cavabları")
+
+class AIGenerateAnswersPayload(BaseModel):
+    pdf_base64: str = Field(..., description="PDF faylın base64 formatı")
+    question_count: int = Field(..., ge=1, le=150, description="Sual sayı")
+
+
+@router.post("/assignments")
+def create_tutor_assignment(payload: CreateAssignmentPayload, current_user: dict = Depends(get_current_user)):
+    db = get_db()
+    _ensure_tutor_role(current_user, db)
+    cleaned_key = {}
+    for k, v in payload.answer_key.items():
+        k_str = str(k).strip()
+        v_str = str(v).strip().upper()
+        if k_str and v_str in ["A", "B", "C", "D", "E"]:
+            cleaned_key[k_str] = v_str
+    if not cleaned_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Ən azı 1 sual üçün doğru cavab variantı qeyd edilməlidir."
+        )
+    assignment_id = str(uuid.uuid4())
+    assignment_data = {
+        "id": assignment_id,
+        "tutor_id": current_user["id"],
+        "course_id": payload.course_id,
+        "title": payload.title.strip(),
+        "pdf_url": payload.pdf_url,
+        "answer_key": cleaned_key,
+        "question_count": payload.question_count,
+        "duration_minutes": payload.duration_minutes,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    try:
+        db.table("tutor_assignments").insert(assignment_data).execute()
+    except Exception as e:
+        print(f"Error inserting tutor assignment: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Sınaq yaradılarkən xəta baş verdi. Zəhmət olmasa yenidən cəhd edin."
+        )
+    return {
+        "success": True,
+        "message": "Sınaq uğurla yaradıldı!",
+        "assignment_id": assignment_id,
+        "assignment": {
+            "id": assignment_id,
+            "title": assignment_data["title"],
+            "question_count": assignment_data["question_count"],
+            "duration_minutes": assignment_data["duration_minutes"],
+            "created_at": assignment_data["created_at"]
+        }
+    }
+
+
+@router.get("/assignments")
+def get_tutor_assignments(current_user: dict = Depends(get_current_user)):
+    db = get_db()
+    _ensure_tutor_role(current_user, db)
+    tutor_id = current_user["id"]
+    try:
+        asg_res = db.table("tutor_assignments").select(
+            "id, title, course_id, pdf_url, question_count, duration_minutes, created_at"
+        ).eq("tutor_id", tutor_id).order("created_at", desc=True).execute()
+        assignments = asg_res.data or []
+    except Exception as e:
+        print(f"Error fetching assignments: {e}")
+        assignments = []
+    for asg in assignments:
+        asg_id = asg["id"]
+        try:
+            sheets_res = db.table("student_answer_sheets").select(
+                "id, score, incorrect_count, empty_count"
+            ).eq("assignment_id", asg_id).execute()
+            sheets = sheets_res.data or []
+            asg["submission_count"] = len(sheets)
+            if sheets:
+                scores = [s.get("score", 0) for s in sheets]
+                asg["avg_score"] = round(sum(scores) / len(scores), 1)
+                asg["max_score"] = max(scores)
+            else:
+                asg["avg_score"] = 0
+                asg["max_score"] = 0
+        except Exception as e:
+            print(f"Error fetching submissions for assignment {asg_id}: {e}")
+            asg["submission_count"] = 0
+            asg["avg_score"] = 0
+            asg["max_score"] = 0
+    return assignments
+
+
+@router.get("/assignments/{assignment_id}/submissions")
+def get_assignment_submissions(assignment_id: str, current_user: dict = Depends(get_current_user)):
+    db = get_db()
+    _ensure_tutor_role(current_user, db)
+    tutor_id = current_user["id"]
+    asg_res = db.table("tutor_assignments").select(
+        "id, title, question_count, duration_minutes, answer_key, pdf_url, created_at"
+    ).eq("id", assignment_id).eq("tutor_id", tutor_id).execute()
+    if not asg_res.data:
+        raise HTTPException(status_code=404, detail="Sınaq tapılmadı və ya sizə aid deyil.")
+    assignment = asg_res.data[0]
+    sheets_res = db.table("student_answer_sheets").select(
+        "id, student_id, answers, score, incorrect_count, empty_count, submitted_at"
+    ).eq("assignment_id", assignment_id).order("submitted_at", desc=True).execute()
+    sheets = sheets_res.data or []
+    student_ids = list({s["student_id"] for s in sheets if s.get("student_id")})
+    students_map = {}
+    if student_ids:
+        try:
+            users_res = db.table("users").select(
+                "id, first_name, last_name, identifier, grade"
+            ).in_("id", student_ids).execute()
+            for u in (users_res.data or []):
+                students_map[u["id"]] = u
+        except Exception as e:
+            print(f"Error fetching students profiles: {e}")
+    enriched_submissions = []
+    for s in sheets:
+        st_info = students_map.get(s["student_id"], {})
+        first_name = st_info.get("first_name", "")
+        last_name = st_info.get("last_name", "")
+        full_name = f"{first_name} {last_name}".strip() or st_info.get("identifier") or "Naməlum Şagird"
+        total_q = assignment.get("question_count", 0)
+        score = s.get("score", 0)
+        percentage = round((score / total_q) * 100, 1) if total_q > 0 else 0
+        enriched_submissions.append({
+            "id": s["id"],
+            "student_id": s["student_id"],
+            "student_name": full_name,
+            "student_identifier": st_info.get("identifier", "-"),
+            "student_grade": st_info.get("grade", "-"),
+            "score": score,
+            "incorrect_count": s.get("incorrect_count", 0),
+            "empty_count": s.get("empty_count", 0),
+            "total_questions": total_q,
+            "percentage": percentage,
+            "answers": s.get("answers", {}),
+            "submitted_at": s.get("submitted_at")
+        })
+    return {
+        "assignment": {
+            "id": assignment["id"],
+            "title": assignment["title"],
+            "question_count": assignment["question_count"],
+            "duration_minutes": assignment["duration_minutes"],
+            "answer_key": assignment.get("answer_key", {}),
+            "pdf_url": assignment.get("pdf_url")
+        },
+        "submissions": enriched_submissions
+    }
+
+
+@router.delete("/assignments/{assignment_id}")
+def delete_tutor_assignment(assignment_id: str, current_user: dict = Depends(get_current_user)):
+    db = get_db()
+    _ensure_tutor_role(current_user, db)
+    tutor_id = current_user["id"]
+    check_res = db.table("tutor_assignments").select("id").eq("id", assignment_id).eq("tutor_id", tutor_id).execute()
+    if not check_res.data:
+        raise HTTPException(status_code=404, detail="Sınaq tapılmadı.")
+    try:
+        db.table("student_answer_sheets").delete().eq("assignment_id", assignment_id).execute()
+        db.table("tutor_assignments").delete().eq("id", assignment_id).execute()
+    except Exception as e:
+        print(f"Delete assignment error: {e}")
+        raise HTTPException(status_code=500, detail="Sınaq silinərkən xəta baş verdi.")
+    return {"success": True, "message": "Sınaq uğurla silindi."}
+
+
+@router.get("/assignments/{assignment_id}/start")
+def start_tutor_assignment_exam(assignment_id: str, current_user: dict = Depends(get_current_user)):
+    db = get_db()
+    user_id = current_user["id"]
+    completed_res = db.table("student_answer_sheets").select(
+        "id, score, incorrect_count, empty_count, submitted_at"
+    ).eq("assignment_id", assignment_id).eq("student_id", user_id).execute()
+    if completed_res.data:
+        sub = completed_res.data[0]
+        return {
+            "is_completed": True,
+            "submission": sub,
+            "message": "Siz artıq bu sınağı tamamlamısınız."
+        }
+    asg_res = db.table("tutor_assignments").select(
+        "id, title, course_id, pdf_url, question_count, duration_minutes, tutor_id, created_at"
+    ).eq("id", assignment_id).execute()
+    if not asg_res.data:
+        raise HTTPException(status_code=404, detail="Sınaq tapılmadı.")
+    asg = asg_res.data[0]
+    tutor_name = "Repetitor"
+    try:
+        tutor_res = db.table("users").select("first_name, last_name").eq("id", asg["tutor_id"]).execute()
+        if tutor_res.data:
+            t = tutor_res.data[0]
+            first_name = t.get("first_name") or ""
+            last_name = t.get("last_name") or ""
+            tutor_name = f"{first_name} {last_name}".strip() or "Repetitor"
+    except Exception:
+        pass
+    return {
+        "id": asg["id"],
+        "title": asg["title"],
+        "question_count": asg.get("question_count", 25),
+        "duration_minutes": asg.get("duration_minutes", 60),
+        "pdf_url": asg.get("pdf_url"),
+        "tutor_name": tutor_name,
+        "is_completed": False
+    }
+
+
+@router.post("/assignments/{assignment_id}/submit")
+def submit_tutor_assignment_exam(
+    assignment_id: str,
+    payload: AssignmentSubmitPayload,
+    current_user: dict = Depends(get_current_user)
+):
+    db = get_db()
+    user_id = current_user["id"]
+    check_res = db.table("student_answer_sheets").select("id").eq(
+        "assignment_id", assignment_id
+    ).eq("student_id", user_id).execute()
+    if check_res.data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Bu sınağın nəticəsi artıq qeydə alınıb."
+        )
+    asg_res = db.table("tutor_assignments").select(
+        "id, title, answer_key, question_count"
+    ).eq("id", assignment_id).execute()
+    if not asg_res.data:
+        raise HTTPException(status_code=404, detail="Sınaq tapılmadı.")
+    asg = asg_res.data[0]
+    answer_key = asg.get("answer_key", {}) or {}
+    total_q = asg.get("question_count") or len(answer_key) or 1
+    user_answers = payload.answers or {}
+    correct_count = 0
+    incorrect_count = 0
+    for q_idx in range(1, total_q + 1):
+        q_key = str(q_idx)
+        correct_ans = str(answer_key.get(q_key, "")).strip().upper()
+        student_ans = str(user_answers.get(q_key, "")).strip().upper()
+        if student_ans:
+            if student_ans == correct_ans:
+                correct_count += 1
+            else:
+                incorrect_count += 1
+    empty_count = max(0, total_q - (correct_count + incorrect_count))
+    percentage = round((correct_count / total_q) * 100, 1) if total_q > 0 else 0
+    sheet_data = {
+        "id": str(uuid.uuid4()),
+        "assignment_id": assignment_id,
+        "student_id": user_id,
+        "answers": user_answers,
+        "score": correct_count,
+        "incorrect_count": incorrect_count,
+        "empty_count": empty_count,
+        "submitted_at": datetime.now(timezone.utc).isoformat()
+    }
+    try:
+        db.table("student_answer_sheets").insert(sheet_data).execute()
+    except Exception as e:
+        print(f"Error saving student answer sheet: {e}")
+        raise HTTPException(status_code=500, detail="Cavab vərəqəsi qeydə alınarkən xəta baş verdi.")
+    return {
+        "message": "Sınaq uğurla təhvil verildi!",
+        "score": correct_count,
+        "incorrect": incorrect_count,
+        "empty": empty_count,
+        "total": total_q,
+        "percentage": percentage
+    }
+
+
+@router.post("/assignments/ai-generate-answers")
+def ai_generate_answers_from_pdf(
+    payload: AIGenerateAnswersPayload,
+    current_user: dict = Depends(get_current_user)
+):
+    db = get_db()
+    _ensure_tutor_role(current_user, db)
+    gemini_api_key = (
+        os.getenv("GEMINI_API_KEY") or
+        os.getenv("GOOGLE_API_KEY") or
+        os.getenv("GEMINI_KEY")
+    )
+    if not gemini_api_key or not gemini_api_key.strip():
+        raise HTTPException(
+            status_code=503,
+            detail="Süni İntellekt xidməti hazırda konfiqurasiya edilməyib (GEMINI_API_KEY tələb olunur)."
+        )
+    clean_base64 = payload.pdf_base64.strip()
+    if "," in clean_base64:
+        clean_base64 = clean_base64.split(",", 1)[1]
+    q_count = payload.question_count
+    prompt = (
+        "Sən peşəkar DİM imtahan eksperti və müəllimsən. Təqdim olunan PDF sınaq imtahan sənədini diqqətlə nəzərdən keçir. "
+        f"Sənəddəki hər bir sualı həll et və 1-dən {q_count}-ə qədər olan suallar üçün doğru variantı (A, B, C, D və ya E) müəyyən et. "
+        "ÇIXIŞI YALNIZ DƏQİQ JSON FORMATINDA VER: {\"answers\": {\"1\": \"A\", \"2\": \"B\"}}"
+    )
+    req_body = json.dumps({
+        "contents": [{
+            "parts": [
+                {
+                    "inline_data": {
+                        "mime_type": "application/pdf",
+                        "data": clean_base64
+                    }
+                },
+                {
+                    "text": prompt
+                }
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.1,
+            "responseMimeType": "application/json"
+        }
+    }).encode("utf-8")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={gemini_api_key.strip()}"
+    req = urllib.request.Request(
+        url,
+        data=req_body,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as response:
+            if response.status == 200:
+                resp_json = json.loads(response.read().decode("utf-8"))
+                text = resp_json["candidates"][0]["content"]["parts"][0]["text"]
+                parsed = json.loads(text)
+                answers = parsed.get("answers", parsed)
+                return {"success": True, "answers": answers}
+    except Exception as e:
+        print(f"Gemini PDF analysis error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Süni intellekt sınaq sənədini analiz edə bilmədi: {str(e)}"
+        )
