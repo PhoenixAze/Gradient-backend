@@ -565,7 +565,7 @@ def create_student_join_request(payload: CreateTutorRequestPayload, current_user
     req_obj = {
         "id": req_id,
         "student_id": current_user["id"],
-        "student_name": f"{current_user.get(first_name, )} {current_user.get(last_name, )}".strip() or "Şagird",
+        "student_name": f"{current_user.get('first_name', '')} {current_user.get('last_name', '')}".strip() or "Şagird",
         "student_identifier": current_user.get("identifier", ""),
         "student_grade": str(current_user.get("grade") or "Məlum deyil"),
         "tutor_id": tutor["id"],
@@ -575,7 +575,7 @@ def create_student_join_request(payload: CreateTutorRequestPayload, current_user
     }
     _insert_tutor_request(req_obj, db)
 
-    tutor_full_name = f"{tutor.get(first_name, )} {tutor.get(last_name, )}".strip()
+    tutor_full_name = f"{tutor.get('first_name', '')} {tutor.get('last_name', '')}".strip()
     return {
         "success": True,
         "message": f"{tutor_full_name} müəllimə qoşulma istəyi göndərildi. Repetitor qəbul etdikdən sonra qrupa daxil olacaqsınız.",
@@ -602,7 +602,7 @@ def accept_tutor_request(request_id: str, current_user: dict = Depends(get_curre
     db.table("users").update({"tutor_id": tutor_id}).eq("id", student_id).execute()
     _update_tutor_request_status(request_id, "accepted", db)
 
-    return {"success": True, "message": f"{req.get(student_name, Şagird)} uğurla qrupa qəbul edildi."}
+    return {"success": True, "message": f"{req.get('student_name', 'Şagird')} uğurla qrupa qəbul edildi."}
 
 @router.post("/requests/{request_id}/reject")
 def reject_tutor_request(request_id: str, current_user: dict = Depends(get_current_user)):
@@ -636,7 +636,7 @@ def get_student_tutor_status(current_user: dict = Depends(get_current_user)):
                 "has_tutor": True,
                 "tutor": {
                     "id": tutor["id"],
-                    "name": f"{tutor.get(first_name, )} {tutor.get(last_name, )}".strip(),
+                    "name": f"{tutor.get('first_name', '')} {tutor.get('last_name', '')}".strip(),
                     "subject": tutor.get("subject", "Ümumi"),
                     "code": t_code
                 },
@@ -650,7 +650,7 @@ def get_student_tutor_status(current_user: dict = Depends(get_current_user)):
         t_subj = "Ümumi"
         if tutor_res.data:
             t = tutor_res.data[0]
-            t_name = f"{t.get(first_name, )} {t.get(last_name, )}".strip()
+            t_name = f"{t.get('first_name', '')} {t.get('last_name', '')}".strip()
             t_subj = t.get("subject", "Ümumi")
         return {
             "has_tutor": False,
@@ -746,7 +746,7 @@ def student_join_tutor(payload: JoinTutorPayload, current_user: dict = Depends(g
     tutor = find_tutor_by_code_or_identifier(code, db)
     if not tutor:
         raise HTTPException(status_code=404, detail="Qeyd olunan 4 rəqəmli koda və ya e-poçta uyğun repetitor tapılmadı.")
-    tutor_full_name = f"{tutor.get(first_name, )} {tutor.get(last_name, )}".strip()
+    tutor_full_name = f"{tutor.get('first_name', '')} {tutor.get('last_name', '')}".strip()
     db.table("users").update({"tutor_id": tutor["id"]}).eq("id", current_user["id"]).execute()
     return {
         "success": True,
