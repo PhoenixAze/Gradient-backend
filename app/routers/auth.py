@@ -114,9 +114,16 @@ def refresh_token(request: Request, response: Response):
         token = request.headers.get("x-refresh-token") or request.headers.get("authorization") or request.headers.get("Authorization")
     if not token:
         raise HTTPException(status_code=401, detail="Refresh token tapılmadı. Yenidən giriş edin.")
-        token = token.split(" ")[1] if " " in token else token
+
+    # "Bearer <token>" formatını təmizləyirik — zero-trust: format yoxlaması icra olunmadan decode edilmir
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Refresh token formatı keçərsizdir. Yenidən giriş edin.")
+
+    try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        
+
         if payload.get("type") != "refresh":
             raise HTTPException(status_code=401, detail="Yanlış token növü.")
             
