@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.core.rate_limit import apply_rate_limits
 from app.routers import auth, users, exams, debug, settings, analytics, tutor, tutor_group
 
 app = FastAPI(
@@ -32,6 +33,12 @@ app.add_middleware(
 )
 
 # Router-ləri sistemə əlavə edirik
+#
+# QEYD (route collision qoruması): `tutor` router-i artıq `/api/v1/tutor`
+# prefiksini tutur və frontend həmin yolları işlədir. `tutor_group` router-i
+# eyni endpoint-ləri (`/dashboard`, `/students/add`, `/requests`, `/profile`)
+# təkrarladığı üçün AYRI prefiksə qeyd olunur — beləliklə route collision
+# yaranmır və mövcud frontend çağırışları qırılmır.
 app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(exams.router)
@@ -39,7 +46,13 @@ app.include_router(settings.router)
 app.include_router(analytics.router)
 app.include_router(tutor.router)
 app.include_router(debug.router)
-app.include_router(tutor_group.router, prefix="/api/v1/tutor", tags=["tutor-group"])
+# Rate limit dekoratorlarını real FastAPI dependency-lərə çeviririk.
+# Bu MÜHİM: FastAPI `Depends(...)` asılılıqlarını endpoint-dən əVVƏL icra edir,
+# ona görə limit yalnız dekoratorun içində yoxlanılsa, autentifikasiya 401 atanda
+# heç vaxt işə düşməzdi (DoS boşluğu). apply_rate_limits bunu dependency-ə çevirir.
+_rate_limited_routes = apply_rate_limits(tutor_group.router)
+
+app.include_router(tutor_group.router, prefix="/api/v1/tutor-group", tags=["tutor-group"])
 
 @app.get("/api/health")
 def health_check():

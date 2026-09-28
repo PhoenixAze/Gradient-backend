@@ -36,7 +36,7 @@ from supabase import Client
 
 from app.core.config import settings
 from app.core.rate_limit import rate_limit
-from app.core.security import get_supabase_admin, require_tutor
+from app.core.security import get_supabase_admin, require_tutor, require_user
 
 logger = logging.getLogger("gradient.tutor_group")
 
@@ -563,5 +563,7 @@ async def update_profile(
     return {"message": "Profil yeniləndi", "tutor": _user_public(row)}
 
 
-# NOTE: `require_user` import yuxarıda `require_tutor` ilə birlikdə verilir.
-from app.core.security import require_user  # noqa: E402  (dairəvi asılılığıqdan qaçmaq üçün)
+# NOTE: `require_user` artıq yuxarıda `require_tutor` ilə birlikdə import olunur
+# (sətir 39). Əvvəlki versiya bu import-u faylın SONUNA qoymuşdu, lakin
+# `create_join_request` funksiyasının imzası icra vaxtında qiymətləndirildiyi
+# üçün bu, import mərhələsində NameError verirdi.
