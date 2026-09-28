@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, users, exams, debug, settings, analytics, tutor
+from app.routers import auth, users, exams, debug, settings, analytics, tutor, tutor_group
 
 app = FastAPI(
     title="Gradient EdTech API",
@@ -39,6 +39,7 @@ app.include_router(settings.router)
 app.include_router(analytics.router)
 app.include_router(tutor.router)
 app.include_router(debug.router)
+app.include_router(tutor_group.router, prefix="/api/v1/tutor", tags=["tutor-group"])
 
 @app.get("/api/health")
 def health_check():
