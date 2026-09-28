@@ -52,8 +52,13 @@ def _random_code() -> str:
     return str(secrets.randbelow(CODE_MAX - CODE_MIN + 1) + CODE_MIN)
 
 
-def _code_taken(db: Client, code: str) -> bool:
-    """Kodun artıq başqa istifadəçiyə aid olub-olmadığını yoxlayır."""
+def _code_taken(db: Client, code: str, exclude_user_id: str | None = None) -> bool:
+    """Kodun BAŞQA bir istifadəçiyə aid olub-olmadığını yoxlayır.
+
+    TƏHLÜKƏSİZLİK: `exclude_user_id` VACİBDİR. Əks halda repetitorun ÖZ kodu
+    "tutulmuş" sayılır və funksiya hər panel açılanda YENİ kod yaradıb
+    üstünü yazır — yəni sistem kodu sabit qalmır.
+    """
     res = (
         db.table("users")
         .select("id, role")
@@ -61,8 +66,11 @@ def _code_taken(db: Client, code: str) -> bool:
         .execute()
     )
     for row in res.data or []:
+        # Öz sətri hesaba katlanmır — repetitor öz kodunu saxlayır.
+        if exclude_user_id and str(row.get("id")) == str(exclude_user_id):
+            continue
         # Yalnız real repetitor kodu sayılır. Köhnə, səhv generasiya olunmuş
-        # şagird sətrinin kodu bloklamasın — o, təmizlənəcək.
+        # şagird sətrinin kodu bloklamasın.
         if str(row.get("role", "")).lower() in TUTOR_ROLES:
             return True
     return False
@@ -75,25 +83,31 @@ def get_or_create_tutor_code(user: dict, db: Client) -> str:
     xəta atılır. Bu, şagirdin özünə kod verilməsinin qarşısını alır.
     """
     user_id = user.get("id")
-    role = str(user.get("role", "")).lower().strip()
+    if not user_id:
+        raise ValueError("İstifadəçi identifikatoru tapılmadı.")
+
+    # Rol: çağıran dict-də ola bilər, olmaya da bilər (bəzi endpoint-lər
+    # `role` sütununu seçmir). Yoxdursa bazadan oxuyuruq — beləliklə rol
+    # yoxlaması heç vaxt "boş" deyə keçmir (fail-closed).
+    role = str(user.get("role") or "").lower().strip()
+    if not role:
+        try:
+            res_role = (
+                db.table("users").select("role").eq("id", user_id).single().execute()
+            )
+            role = str((res_role.data or {}).get("role") or "").lower().strip()
+        except Exception:
+            role = ""
 
     if role not in TUTOR_ROLES:
         logger.warning(
-            "tutor_code_denied user_id=%s role=%s", user_id, role
+            "tutor_code_denied user_id=%s role=%s", user_id, role or "(yoxdur)"
         )
         raise ValueError(
             "Yalnız repetitor hesabı üçün sistem kodu yaradıla bilər."
         )
 
-    if not user_id:
-        raise ValueError("İstifadəçi identifikatoru tapılmadı.")
-
-    # 1) Artıq mövcud və düzgün kod varsa, dəyişmə — kod sabitdir.
-    existing = user.get("tutor_code") or user.get("invite_code")
-    if is_valid_code(existing) and not _code_taken(db, str(existing).strip()):
-        return str(existing).strip()
-
-    # 2) DB-dəki cari vəziyyəti yenidən oxu (token/session köhnə ola bilər)
+    # 1) DB-dəki cari vəziyyəti oxu (token/session köhnə ola bilər)
     try:
         res = (
             db.table("users")
@@ -103,16 +117,32 @@ def get_or_create_tutor_code(user: dict, db: Client) -> str:
             .execute()
         )
         db_code = (res.data or {}).get("tutor_code")
-        if is_valid_code(db_code) and not _code_taken(db, str(db_code).strip()):
-            return str(db_code).strip()
     except Exception:
-        # Sətr tapılmadısa və ya oxunmasa — aşağıda yeni kod generasiya olunur.
+        db_code = None
         logger.debug("tutor_code_read_failed user_id=%s", user_id)
 
-    # 3) Unikal kod generasiya et
+    # 2) KOD SABİTDİR — bir dəfə verilən kod HEÇ VAKT dəyişmir.
+    #    `exclude_user_id` vacibdir: repetitorun öz sətri "tutulmuş" sayılmasın.
+    #    Əks halda hər panel açılanda yeni kod yaradılıb üstü yazılırdı və
+    #    şagird əvvəlki kodu ilə artıq repetitorun qrupuna qoşula bilmirdi.
+    if is_valid_code(db_code) and not _code_taken(db, str(db_code).strip(), exclude_user_id=user_id):
+        return str(db_code).strip()
+
+    # 3) Sessiyada mövcud ola bilən kod (DB oxunmasa da)
+    existing = user.get("tutor_code") or user.get("invite_code")
+    if is_valid_code(existing) and not _code_taken(db, str(existing).strip(), exclude_user_id=user_id):
+        try:
+            db.table("users").update({"tutor_code": str(existing).strip()}).eq(
+                "id", user_id
+            ).eq("role", "tutor").execute()
+        except Exception:
+            logger.exception("tutor_code_write_failed user_id=%s", user_id)
+        return str(existing).strip()
+
+    # 4) Yalnız həqiqətən kodu OLANDA yeni unikal kod generasiya et
     for _ in range(MAX_ATTEMPTS):
         candidate = _random_code()
-        if _code_taken(db, candidate):
+        if _code_taken(db, candidate, exclude_user_id=user_id):
             continue
         try:
             db.table("users").update({"tutor_code": candidate}).eq(

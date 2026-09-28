@@ -431,49 +431,71 @@ def get_or_create_4digit_code(tutor: dict, db=None) -> str:
         db = get_db()
     return get_or_create_tutor_code(tutor, db)
 
+# Axtarış üçün təhlükəsiz sütun siyahısı: `password_hash` HEÇ VAYT seçilmir
+# (.clinerules §1 — şifrə heç bir cavabda və ya logda görünməməlidir).
+_TUTOR_LOOKUP_FIELDS = "id, role, first_name, last_name, identifier, subject, tutor_code"
+
+# Bu funksiyanın qaytara biləcəyi rollar
+_TUTOR_LOOKUP_ROLES = ("tutor", "teacher", "repetitor", "admin", "instructor")
+
+
 def find_tutor_by_code_or_identifier(code: str, db):
+    """Repetitoru 4 rəqəmli SİSTEM kodu, identifier və ya id ilə tapır.
+
+    ⛔ ƏVVƏLKI (ZƏRƏRLİ) İMPLEMENTASİYA:
+        Son mərhələdə bütün repetitorlar dövürülürdü və hər biri üçün
+        `get_or_create_4digit_code()` çağırılırdı — yəni bu AXTARIŞ funksiyası
+        bazaya YAZIRDı. Nəticə:
+          * Şagird istək göndərən kimi BÜTÜN repetitorların kodu dəyişirdi.
+          * Şagird daxil etdiyi kod artıq heç kimə aid olmurdu.
+          * `tutor_code` uyğun gəlməyəndə dövür köhnədən `tutor` rolu almış
+            hesabı qaytara bilərdi → "Öz hesabınıza istək göndərə bilməzsiniz".
+
+    ✅ İNDİ: funksiya TAMAMILƏ read-only-dir — heç nə yaradılmır, yazılmır.
+       Yalnız əvvəlcədən verilmiş `tutor_code` axtarılır.
+    """
     clean_code = code.strip()
     if not clean_code:
         return None
 
-    # 1. tutor_code sütunu ilə axtarış
+    # 1) 4 rəqəmli SİSTEM kodu ilə axtarış
     try:
-        res = db.table("users").select("*").eq("tutor_code", clean_code).execute()
-        if res.data:
-            for t in res.data:
-                role = str(t.get("role", "")).lower()
-                if role in ["tutor", "teacher", "repetitor", "admin", "instructor"]:
-                    return t
+        res = (
+            db.table("users")
+            .select(_TUTOR_LOOKUP_FIELDS)
+            .eq("tutor_code", clean_code)
+            .execute()
+        )
+        for t in res.data or []:
+            if str(t.get("role", "")).lower() in _TUTOR_LOOKUP_ROLES:
+                return t
     except Exception:
         pass
 
-    # 2. identifier (email/telefon) və ya id ilə axtarış
+    # 2) E-poçt / telefon (identifier) ilə axtarış
     try:
-        res = db.table("users").select("*").eq("identifier", clean_code).execute()
-        if res.data:
-            for t in res.data:
-                role = str(t.get("role", "")).lower()
-                if role in ["tutor", "teacher", "repetitor", "admin", "instructor"]:
-                    return t
+        res = (
+            db.table("users")
+            .select(_TUTOR_LOOKUP_FIELDS)
+            .eq("identifier", clean_code)
+            .execute()
+        )
+        for t in res.data or []:
+            if str(t.get("role", "")).lower() in _TUTOR_LOOKUP_ROLES:
+                return t
     except Exception:
         pass
 
+    # 3) UUID ilə axtarış
     try:
-        res = db.table("users").select("*").eq("id", clean_code).execute()
-        if res.data:
-            for t in res.data:
-                role = str(t.get("role", "")).lower()
-                if role in ["tutor", "teacher", "repetitor", "admin", "instructor"]:
-                    return t
-    except Exception:
-        pass
-
-    # 3. Bütün repetitorlar üzərindən deterministik 4 rəqəmli kod yoxlanışı
-    try:
-        tutors_res = db.table("users").select("*").in_("role", ["tutor", "teacher", "repetitor", "admin"]).execute()
-        tutors = tutors_res.data or []
-        for t in tutors:
-            if get_or_create_4digit_code(t, db) == clean_code:
+        res = (
+            db.table("users")
+            .select(_TUTOR_LOOKUP_FIELDS)
+            .eq("id", clean_code)
+            .execute()
+        )
+        for t in res.data or []:
+            if str(t.get("role", "")).lower() in _TUTOR_LOOKUP_ROLES:
                 return t
     except Exception:
         pass
