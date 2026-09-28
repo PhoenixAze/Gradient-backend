@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
+from app.core.tutor_code import get_or_create_tutor_code
 from app.database import get_db
 from app.security import get_current_user, get_password_hash, verify_password
 
@@ -57,20 +58,41 @@ def _normalize_phone_or_identifier(identifier: str) -> List[str]:
     return result
 
 def _ensure_tutor_role(current_user: dict, db) -> None:
-    """
-    İstifadəçinin repetitor panelindən istifadə etmək səlahiyyətini təmin edir.
-    Əgər istifadəçinin rolu 'student' qalıbsa, repetitor panelində işləməsi üçün
-    bazada rolunu 'tutor' olaraq yeniləyir.
+    """Təhlükəsizlik qəzası: repetitor səlahiyyətini YOXLAyır, VERMİR.
+
+    ⛔ ƏVVƏLKI (ZƏRƏRLİ) İMPLEMENTASİYA:
+        Rolu 'student' olan istifadəçi repetitor panelinin HƏRƏY endpoint-inə
+        daxil olanda bazada avtomatik olaraq 'tutor' rolu verilirdi
+        (privilege escalation). Nəticə:
+          * Şagird repetitor olurdu — heç nə tələb etmədən.
+          * Şagirdə 4 rəqəmli SİSTEM KODU verilirdi.
+          * Həmin kod həqiqi repetitorun kodu ilə KONFLİKT yaradırdı.
+          * Nəticədə şagird "Öz kodunuzu daxil edə bilməzsiniz" xətası alırdı
+            və əsl repetitorun qrupuna daqil ola bilmirdi.
+
+    ✅ İNDİ:
+        Rol heç vaxt dəyişdirilmir. Rol yalnız `POST /api/v1/auth/register`
+        zamanı "Mən repetitoram" seçimi ilə təyin olunur. Burada yalnız
+        yoxlama aparılır və uyğun deyilsə 403 qaytarılır (fail-closed).
+
+    Ad və imza qorunur: 17 endpoint bu funksiyanı çağırır, dəyişiklik
+    minimal və mövcud endpoint imzaları ilə uyğun qalır.
     """
     role = str(current_user.get("role", "")).lower().strip()
-    allowed_roles = ["tutor", "teacher", "repetitor", "admin", "moderator", "instructor", "superadmin"]
-    
+    allowed_roles = {
+        "tutor", "teacher", "repetitor", "instructor",
+        "admin", "moderator", "superadmin",
+    }
+
     if role not in allowed_roles:
-        try:
-            db.table("users").update({"role": "tutor"}).eq("id", current_user["id"]).execute()
-            current_user["role"] = "tutor"
-        except Exception as e:
-            print(f"Role auto-update warning: {e}")
+        print(
+            f"AUTHORIZATION DENIED: user_id={current_user.get('id')} "
+            f"role={role!r} — repetitor endpoint-i. Rol dəyişdirilmədi."
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Bu əməliyyat üçün repetitor səlahiyyəti tələb olunur.",
+        )
 
 @router.get("/dashboard")
 def get_tutor_dashboard(current_user: dict = Depends(get_current_user)):
@@ -393,26 +415,21 @@ def remove_student_from_group(student_id: str, current_user: dict = Depends(get_
     return {"success": True, "message": "Şagird qrupdan çıxarıldı."}
 
 def get_or_create_4digit_code(tutor: dict, db=None) -> str:
+    """Repetitor üçün unikal 4 rəqəmli SİSTEM kodunu qaytarır (yoxdursa yaradır).
+
+    ⛔ ƏVVƏLKI (ZƏRƏRLİ) İMPLEMENTASİYA:
+        `zlib.crc32(id) % 9000 + 1000` — bu, yalnız 9000 mümkün dəyər verir,
+        təsadüfi DEYİL (eyni id hər zaman eyni kodu alır) və unikal yoxlaması
+        YOXDUR. Nəticədə iki repetitor eyni kodu ala bilirdi və şagirdlər
+        `find_tutor_by_code_or_identifier` ilə YANLIŞ repetitorun qrupuna
+        daxil olurdu.
+
+    ✅ İNDİ: `app.core.tutor_code` — kriptoqrafik təsadüfi kod + DB ilə unikal
+    yoxlaması + təkrar cəhd. Kod yalnız `role = 'tutor'` olan sətrə yazılır.
     """
-    Repetitor üçün unikal 4 rəqəmli sistem kodu təyin edir və ya mövcud olanı qaytarır.
-    Format: 1000 - 9999 arası unikal 4 rəqəm (məs: 4829).
-    """
-    code = tutor.get("tutor_code") or tutor.get("invite_code")
-    if code:
-        s = str(code).strip()
-        if len(s) == 4 and s.isdigit():
-            return s
-
-    tutor_id_str = str(tutor.get("id") or tutor.get("identifier") or "tutor")
-    computed = str((zlib.crc32(tutor_id_str.encode("utf-8")) % 9000) + 1000)
-
-    if db and tutor.get("id"):
-        try:
-            db.table("users").update({"tutor_code": computed}).eq("id", tutor["id"]).execute()
-        except Exception:
-            pass
-
-    return computed
+    if db is None:
+        db = get_db()
+    return get_or_create_tutor_code(tutor, db)
 
 def find_tutor_by_code_or_identifier(code: str, db):
     clean_code = code.strip()

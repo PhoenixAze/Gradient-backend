@@ -37,6 +37,7 @@ from supabase import Client
 from app.core.config import settings
 from app.core.rate_limit import rate_limit
 from app.core.security import get_supabase_admin, require_tutor, require_user
+from app.core.tutor_code import get_or_create_tutor_code
 
 logger = logging.getLogger("gradient.tutor_group")
 
@@ -140,16 +141,21 @@ async def get_dashboard(
 
         # Əgər köhnə sətirdə kod yoxdursa (trigger-dan əvvəl yaradılmış),
         # o zamanı bir dəfə generate edib yadda saxla.
+        #
+        # TƏHLÜKƏSİZLİK: Əvvəl `random.randint(1000, 9999)` istifadə olunurdu
+        # və UNİKALLIQ YOXLANMIRDı — iki repetitor eyni kodu ala bilirdi.
+        # İndi mərkəzləşdirilmiş `app.core.tutor_code` işlədilir: kriptoqrafik
+        # təsadüfi kod + DB unikal yoxlaması + təkrar cəhd.
         if not tutor_row.get("tutor_code"):
+            fresh_code = get_or_create_tutor_code(tutor_row, db)
             tutor_row = (
                 db.table("users")
                 .select("id, first_name, last_name, identifier, subject, tutor_code")
                 .eq("id", tutor_id)
-                .update({"tutor_code": f"{__import__('random').randint(1000, 9999)}"})
                 .single()
                 .execute()
                 .data
-            )
+            ) or {**tutor_row, "tutor_code": fresh_code}
 
         students = (
             db.table("users")
