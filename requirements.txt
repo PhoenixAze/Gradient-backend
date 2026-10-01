@@ -1,6 +1,9 @@
 fastapi
 uvicorn[standard]
-pydantic
+# Pydantic v2 MÜHÜMDÜR: `app/routers/debug.py` `field_validator` istifadə edir
+# (v2-yə xas API). Versiya pin edilməsə, Render pydantic v1 quraşdıra bilər
+# və import zamanı AttributeError ataraq bütün tətbiqi dayandırır.
+pydantic>=2.7,<3
 supabase
 python-dotenv
 passlib[bcrypt]
