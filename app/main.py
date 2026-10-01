@@ -39,6 +39,24 @@ app.add_middleware(
 # eyni endpoint-ləri (`/dashboard`, `/students/add`, `/requests`, `/profile`)
 # təkrarladığı üçün AYRI prefiksə qeyd olunur — beləliklə route collision
 # yaranmır və mövcud frontend çağırışları qırılmır.
+# Rate limit dekoratorlarını real FastAPI dependency-lərə çeviririk.
+# Bu MÜHİM: FastAPI `Depends(...)` asılılıqlarını endpoint-dən əVVƏL icra edir,
+# ona görə limit yalnız dekoratorun içində yoxlanılsa, autentifikasiya 401 atanda
+# heç vaxt işə düşməzdi (DoS boşluğu). apply_rate_limits bunu dependency-ə çevirir.
+_rate_limited_routes = apply_rate_limits(tutor_group.router)
+
+# AI analiz endpoint-ləri `ai` bucket-ındadır (bahalı əməliyyat) — eyni
+# mexanizm tətbiq olunmalıdır, əks halda `@rate_limit("ai")` dekoratoru
+# heç vaxt icra olunmaz və limit işləməz.
+_rate_limited_analytics_routes = apply_rate_limits(analytics.router)
+
+# Debug konsolu endpoint-ləri də `@rate_limit` dekoratoru ilə qorunur.
+# BU ÇAĞRI MÜHÜMDÜR: `apply_rate_limits` dekoratoru real `Depends(...)`
+# asılılığına çevirir və limiti autentifikasiyadan ƏVVƏL yoxlayır.
+# Çağrılmasa, `@rate_limit("read"/"write")` heç vaxt icra olunmaz —
+# yəni bütün debug endpoint-ləri limitsiz və bloklayıcı cəzasız qalardı.
+_rate_limited_debug_routes = apply_rate_limits(debug.router)
+
 app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(exams.router)
@@ -46,12 +64,6 @@ app.include_router(settings.router)
 app.include_router(analytics.router)
 app.include_router(tutor.router)
 app.include_router(debug.router)
-# Rate limit dekoratorlarını real FastAPI dependency-lərə çeviririk.
-# Bu MÜHİM: FastAPI `Depends(...)` asılılıqlarını endpoint-dən əVVƏL icra edir,
-# ona görə limit yalnız dekoratorun içində yoxlanılsa, autentifikasiya 401 atanda
-# heç vaxt işə düşməzdi (DoS boşluğu). apply_rate_limits bunu dependency-ə çevirir.
-_rate_limited_routes = apply_rate_limits(tutor_group.router)
-
 app.include_router(tutor_group.router, prefix="/api/v1/tutor-group", tags=["tutor-group"])
 
 @app.get("/api/health")
