@@ -402,7 +402,7 @@ def get_exam_attempts(exam_id: str, current_user: dict = Depends(get_current_use
     try:
         attempts_res = db.table("exam_attempts").select(
             "id, exam_result_id, attempt_no, is_primary, score, incorrect_count, "
-            "empty_count, total_questions, weak_topics, ai_analysis, ai_model, created_at"
+            "empty_count, total_questions, weak_topics, ai_analysis, created_at"
         ).eq("exam_id", exam_id).eq("student_id", current_user["id"]) \
             .order("attempt_no", desc=True).limit(MAX_ATTEMPT_HISTORY).execute()
         raw_attempts = attempts_res.data or []
@@ -445,7 +445,9 @@ def get_exam_attempts(exam_id: str, current_user: dict = Depends(get_current_use
             "percentage": round(sc / tq * 100, 1) if tq > 0 else 0,
             "weak_topics": a.get("weak_topics") or [],
             "has_ai_analysis": bool(a.get("ai_analysis")),
-            "ai_model": a.get("ai_model"),
+            # `ai_model` (provider adı) cavaba daxil EDİLMİR — minimal data
+            # prinsipi (.clinerules §1) və brendinq: texniki model adı
+            # istifadəçi üçün məlumat deyil.
             "created_at": a.get("created_at"),
         })
 

@@ -403,7 +403,7 @@ def get_attempt_detail(
     try:
         res = db.table("exam_attempts").select(
             "id, exam_id, attempt_no, is_primary, score, incorrect_count, empty_count, "
-            "total_questions, question_details, weak_topics, ai_analysis, ai_model, "
+            "total_questions, question_details, weak_topics, ai_analysis, "
             "ai_generated_at, created_at"
         ).eq("id", attempt_id).eq("student_id", student_id).limit(1).execute()
         row = (res.data or [None])[0]
@@ -461,8 +461,9 @@ def get_attempt_detail(
         ),
         "weak_topics": row.get("weak_topics") or [],
         # AI analiz eyni cavabda qaytarılır → "tarixçədən bax" AI XƏRCI ETMİR.
+        # TƏHLÜKƏSİZLİK/brendinq: `ai_model` (provider adı) cavaba daxil EDİLMİR —
+        # minimal data prinsipi + texniki detallar istifadəçiyə lazım deyil.
         "ai_analysis": row.get("ai_analysis"),
-        "ai_model": row.get("ai_model"),
         "ai_generated_at": row.get("ai_generated_at"),
         "created_at": row.get("created_at"),
         "questions": questions,
@@ -484,7 +485,7 @@ def get_cached_attempt_analysis(
     db = get_db()
     try:
         res = db.table("exam_attempts").select(
-            "ai_analysis, ai_model, ai_generated_at"
+            "ai_analysis, ai_generated_at"
         ).eq("id", attempt_id).eq("student_id", current_user["id"]).limit(1).execute()
         row = (res.data or [None])[0]
     except Exception:
@@ -498,7 +499,7 @@ def get_cached_attempt_analysis(
         "attempt_id": attempt_id,
         "analysis": row.get("ai_analysis"),
         "cached": True,
-        "ai_model": row.get("ai_model"),
+        # Model adı istifadəçiyə göndərilmir (brendinq/məxfilik).
         "generated_at": row.get("ai_generated_at"),
     }
 
@@ -638,7 +639,7 @@ async def analyze_attempt(
     try:
         attempt_res = db.table("exam_attempts").select(
             "id, exam_id, attempt_no, score, incorrect_count, empty_count, total_questions, "
-            "question_details, weak_topics, ai_analysis, ai_model, ai_generated_at, created_at"
+            "question_details, weak_topics, ai_analysis, ai_generated_at, created_at"
         ).eq("id", attempt_id).eq("student_id", student_id).limit(1).execute()
         if attempt_res.data:
             attempt = attempt_res.data[0]
@@ -683,7 +684,7 @@ async def analyze_attempt(
             "attempt_id": attempt_id,
             "analysis": attempt["ai_analysis"],
             "cached": True,
-            "ai_model": attempt.get("ai_model"),
+            # Model adı istifadəçiyə göndərilmir (brendinq/məxfilik).
         }
 
     if not is_configured():
@@ -734,7 +735,7 @@ async def analyze_attempt(
         "attempt_id": attempt_id,
         "analysis": data,
         "cached": False,
-        "ai_model": model,
+        # Model adı istifadəçiyə göndərilmir (brendinq/məxfilik).
     }
 
 
@@ -838,7 +839,7 @@ async def analyze_overall(
     try:
         existing_res = db.table("student_ai_insights").select(
             "id, summary, headline, focus_subjects, focus_topics, strong_topics, "
-            "recommendations, ai_model, version, updated_at"
+            "recommendations, version, updated_at"
         ).eq("student_id", student_id).limit(1).execute()
         existing = (existing_res.data or [None])[0]
     except Exception:
@@ -856,7 +857,7 @@ async def analyze_overall(
                 "recommendations": existing.get("recommendations") or [],
             },
             "cached": True,
-            "ai_model": existing.get("ai_model"),
+            # Model adı istifadəçiyə göndərilmir (brendinq/məxfilik).
             "version": existing.get("version"),
             "updated_at": existing.get("updated_at"),
         }
@@ -868,13 +869,20 @@ async def analyze_overall(
         )
 
     user_content = _build_overall_prompt(stats)
-    data, model = generate_json(_OVERALL_SYSTEM_PROMPT, user_content)
+    # Ümumi analiz cavabı cəhd analizindən böyükdür → daha böyük bütçə verilir
+    # (`generate_json` kəsilmiş JSON-u tapıntıq atarsa özü ikiqat artırır).
+    data, model = generate_json(
+        _OVERALL_SYSTEM_PROMPT, user_content, max_output_tokens=8192
+    )
 
     if data is None:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="AI xidməti hazırda cavab verə bilmədi. Bir az sonra yenidən cəhd edin.",
-        )
+        # İSO TƏHLÜKƏSİZLİK/ETİBAR: provider xətası (kvota, 5xx, bloklama)
+        # bütün funksiyanı öldürməməlidir. Deterministik analiz faktiki
+        # məlumatdan qurulur → istifadəçi heç vaxt "ölü" panel görmür.
+        # Model adı cavabda YOXDUR (brendinq/məxfilik).
+        logger.warning("overall_ai_failed_using_deterministic_fallback")
+        data = _build_deterministic_overall(stats)
+        model = None
 
     row = {
         "student_id": student_id,
@@ -906,8 +914,10 @@ async def analyze_overall(
         "has_analysis": True,
         "analysis": data,
         "cached": False,
-        "ai_model": model,
+        # TƏHLÜKƏSİZLİK/brendinq: provider və model adı istifadəçiyə
+        # qaytarılmır (yalnız server logunda qalır).
         "version": row["version"],
+        "updated_at": row["updated_at"],
     }
 
 
@@ -948,7 +958,7 @@ def get_cached_overall(current_user: dict = Depends(get_current_user)):
     try:
         res = db.table("student_ai_insights").select(
             "id, summary, headline, focus_subjects, focus_topics, strong_topics, "
-            "recommendations, stats_snapshot, ai_model, version, updated_at"
+            "recommendations, stats_snapshot, version, updated_at"
         ).eq("student_id", current_user["id"]).limit(1).execute()
         row = (res.data or [None])[0]
     except Exception:
@@ -968,9 +978,92 @@ def get_cached_overall(current_user: dict = Depends(get_current_user)):
             "recommendations": row.get("recommendations") or [],
         },
         "stats_snapshot": row.get("stats_snapshot") or {},
-        "ai_model": row.get("ai_model"),
+        # Model adı istifadəçiyə göndərilmir (brendinq/məxfilik).
         "version": row.get("version"),
         "updated_at": row.get("updated_at"),
+    }
+
+
+def _build_deterministic_overall(stats: dict) -> dict:
+    """
+    Gemini uğursuz olanda ümumi analizin DETERMİNİSTİK fallback-i.
+
+    MƏQSƏD: provider xətası (kvota, 5xx, bloklama, JSON parse) bütün funksiyanı
+    öldürməsin — istifadəçi faktiki, hal- hazırda mövcud olan aqreqatlardan
+    tərtib edilmiş analiz görür.
+
+    TƏHLÜKƏSİZLİK: burada UYDURMA rəqəm yoxdur — hər dəyər `stats`-dən gəlir.
+    Mətn yalnız `textContent` ilə çatdırılacağı üçün HTML injection mümkün deyil.
+    """
+    subjects = stats.get("subject_stats") or []
+    topics = stats.get("topic_stats") or []
+    accuracy = stats.get("accuracy_pct") or 0.0
+    total_exams = stats.get("total_exams") or 0
+
+    focus_subjects = [
+        {
+            "subject": s.get("subject"),
+            "accuracy_pct": s.get("accuracy_pct"),
+            "reason": f"{s.get('incorrect_count', 0)} səhv, {s.get('empty_count', 0)} boş cavab",
+        }
+        for s in sorted(subjects, key=lambda x: x.get("accuracy_pct") or 0)[:5]
+    ]
+
+    focus_topics = [
+        {
+            "topic": t.get("topic"),
+            "accuracy_pct": t.get("accuracy_pct"),
+            "priority": "high" if (t.get("accuracy_pct") or 0) < 50 else "medium",
+            "action": "Bu mövzunu təkrar edin və test həll edin",
+        }
+        for t in topics[:15]
+    ]
+
+    strong_topics = [
+        {
+            "topic": t.get("topic"),
+            "note": f"{t.get('correct_count', 0)}/{t.get('total_questions', 0)} düzgün cavab",
+        }
+        for t in sorted(topics, key=lambda x: -(x.get("accuracy_pct") or 0))[:10]
+    ]
+
+    parts: List[str] = [
+        f"{total_exams} sınaq nəticəsi üzrə ümumi dəqiqlik {accuracy}%.",
+        f"Cəmi {stats.get('total_questions') or 0} sual cavablandırılıb.",
+    ]
+    if subjects:
+        best = max(subjects, key=lambda x: x.get("accuracy_pct") or 0)
+        worst = min(subjects, key=lambda x: x.get("accuracy_pct") or 0)
+        parts.append(
+            f"Ən güclü fənn '{best.get('subject')}', ən zəif fənn '{worst.get('subject')}'."
+        )
+    if topics:
+        weakest = min(topics, key=lambda x: x.get("accuracy_pct") or 0)
+        parts.append(f"Ən çətin mövzu: {weakest.get('topic')}.")
+
+    recommendations: List[str] = []
+    if focus_subjects:
+        recommendations.append(
+            f"'{focus_subjects[0].get('subject')}' fənninə həftədə ən azı 2 dəfikə vaxt ayırın."
+        )
+    if focus_topics:
+        recommendations.append(
+            f"'{focus_topics[0].get('topic')}' mövzusunu əvvəlcə nəzərdən keçirin."
+        )
+    recommendations.append("Səhvlərinizi sınaq günü deyil, dərhal cavab verəndə yoxlayın.")
+
+    return {
+        "summary": " ".join(parts),
+        "headline": f"Ümumi dəqiqlik {accuracy}% ({total_exams} sınaq).",
+        "focus_subjects": focus_subjects,
+        "focus_topics": focus_topics,
+        "strong_topics": strong_topics,
+        "recommendations": recommendations,
+        "weekly_plan": [
+            "Zəif fənni seçin və 2 gün ərzində təkrar mövzusunu tamamlayın.",
+            "Ən zəif 5 mövzunun testini həll edin.",
+            "Səhv etdiyiniz sualları şərh edərək yekun vərəq yazın.",
+        ],
     }
 
 

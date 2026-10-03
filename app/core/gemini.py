@@ -44,19 +44,33 @@ _API_KEY_ENV_NAMES: Tuple[str, ...] = (
     "GEMINI_KEY",
 )
 
-# Sıra = prioritet. Əvvəlcə bahalı deyil, sürətli model; sonra ehtiyat.
-# QEYD: dayandırılmış model adları (gemini-1.5-flash, gemini-2.0-flash)
-# API tərəfindən 404 qaytarır → bütün siyahı boş qalır → analiz heç vaxt
-# uğurlu olmur. Buna görə yalnız aktiv modellər saxlanılır.
+# Sıra = prioritet. Əvvəlcə sürətli model; sonra ehtiyat (ucuz) model.
+#
+# QEYD 1 (bu versiyanın səbəbi): dayandırılmış alias-lar
+# (`gemini-flash-latest`, `gemini-2.0-flash`, `gemini-1.5-flash`) API tərəfindən
+# 404 qaytarır → hər biri bir HTTP səhri + ~1s latency yalayır və siyahı
+# sonuna qədər sınanır. Onlar siyahıdan TAMAMİLƏ çıxarıldı.
+# QEYD 2: yalnız stabil, uzunmüddətli alias-lar (`-flash`) saxlanılır ki,
+# Render-da "model yox oldu" xətası analizi dayandırmasın.
+# QEYD 3 (thinking): 2.5 seriyasında "thinking" default ON-dur və
+# `maxOutputTokens` bütçəsinin bir hissəsini "düşünməyə" sərf edir →
+# uzun JSON cavabı KƏSİLİR və parse uğursuz olur (analiz "işləmir").
+# `thinkingBudget: 0` ilə model yalnız cavab tokenlərinə görə işləyir.
 _MODELS: Tuple[str, ...] = (
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
-    "gemini-2.0-flash",
-    "gemini-flash-latest",
 )
 
 _API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models"
 _TIMEOUT_SECONDS = 25
+
+# Ümumi analiz (bütün sınaqlar) JSON-u cəhd analizindən XEYLİ böyükdür
+# (fənn + mövzu + plan). Kəsilməmək üçün yuxarı bütçə; aşağıda
+# `generate_json` uğursuz parse zamanı bir dəfə ikiqat artırır.
+DEFAULT_MAX_OUTPUT_TOKENS = 4096
+# Bir model iki dəfə sınanır: ikinci cəhd daha böyük bütçə ilə
+# (kəsilmiş JSON'u tamamlamağa çalışır).
+_MAX_RETRIES_PER_MODEL = 2
 
 
 def get_api_key() -> Optional[str]:
@@ -78,6 +92,32 @@ def is_configured() -> bool:
 
 def _build_prompt(system_prompt: str, user_content: str) -> str:
     return f"{system_prompt.strip()}\n\n---\n{user_content.strip()}"
+
+
+def _build_payload(
+    max_output_tokens: int,
+    temperature: float,
+) -> Dict[str, Any]:
+    """
+    Təhlükəsiz/ödəksiz generation konfiqurasiyası.
+
+    TƏHLÜKƏSİZLİK: `temperature` aşağıdır (0.3) və `responseMimeType=json`
+    → model yalnız strukturlaşdırılmış mətn qaytarır, istənilən içəriyi yox.
+    `thinkingBudget: 0` → "düşünmə" tokenləri cavab bütçəsini yemir.
+    """
+    return {
+        "contents": [{"role": "user", "parts": [{"text": ""}]}],
+        "generationConfig": {
+            "temperature": temperature,
+            "maxOutputTokens": max_output_tokens,
+            "responseMimeType": "application/json",
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
+        "safetySettings": [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_ONLY_HIGH"},
+        ],
+    }
 
 
 def _post(model: str, api_key: str, payload: Dict[str, Any]) -> Optional[str]:
@@ -149,7 +189,7 @@ def _extract_json(text: str) -> Optional[Any]:
 def generate_json(
     system_prompt: str,
     user_content: str,
-    max_output_tokens: int = 2048,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     temperature: float = 0.3,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
@@ -161,37 +201,46 @@ def generate_json(
 
     `temperature` 0.3-dir: analiz faktiki və təkrar edilə bilən olmalıdır,
     yaradıcı "mətn gəl-gəl" yox, struktur qurulmalıdır.
+
+    İSO reliability: hər model iki dəfə sınanır; cavab JSON-u parse
+    OLUNMASA (adətən `maxOutputTokens` kəsilməsi) bütçə ikiqat artırılıb
+    təkrar sorğu göndərilir — uzun JSON-larda (ümumi analiz) endpoint-in
+    "işləmir" görünməsinin əsas səbəbini aradan qaldırır.
     """
     api_key = get_api_key()
     if not api_key:
         return None, None
 
     prompt = _build_prompt(system_prompt, user_content)
-    payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": temperature,
-            "maxOutputTokens": max_output_tokens,
-            "responseMimeType": "application/json",
-        },
-        "safetySettings": [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_ONLY_HIGH"},
-        ],
-    }
+    budget = max(1024, int(max_output_tokens))
 
     for model in _MODELS:
-        text = _post(model, api_key, payload)
-        if not text:
-            continue
-        parsed = _extract_json(text)
-        if isinstance(parsed, dict):
-            logger.info("gemini_ok model=%s", model)
-            return parsed, model
-        if isinstance(parsed, list):
-            # Model siyahı qaytardısa onu {"items": [...]} şəklində normallaşdırırıq
-            logger.info("gemini_ok_list model=%s", model)
-            return {"items": parsed}, model
+        current_budget = budget
+        for attempt in range(1, _MAX_RETRIES_PER_MODEL + 1):
+            payload = _build_payload(current_budget, temperature)
+            payload["contents"] = [{"role": "user", "parts": [{"text": prompt}]}]
+
+            text = _post(model, api_key, payload)
+            if not text:
+                # Boş HTTP/timeout nəticəsi → bütçəni artırmaq işə yaramır,
+                # növbəti cəhdə keç.
+                break
+
+            parsed = _extract_json(text)
+            if isinstance(parsed, dict):
+                logger.info("gemini_ok model=%s attempt=%s", model, attempt)
+                return parsed, model
+            if isinstance(parsed, list):
+                # Model siyahı qaytardısa onu {"items": [...]} şəklində normallaşdırırıq
+                logger.info("gemini_ok_list model=%s attempt=%s", model, attempt)
+                return {"items": parsed}, model
+
+            # Parse uğursuz → daha böyük bütçə ilə təkrar cəhd
+            logger.warning(
+                "gemini_retry_larger_budget model=%s attempt=%s budget=%s",
+                model, attempt, current_budget,
+            )
+            current_budget *= 2
 
     logger.warning("gemini_all_models_failed")
     return None, None
