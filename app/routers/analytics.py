@@ -33,6 +33,15 @@ router = APIRouter(prefix="/api/v1/analytics", tags=["Analytics"])
 MAX_TOPIC_ROWS = 40
 MIN_SAMPLE_FOR_TOPIC = 1
 
+# Şagirdin bütün cəhdləri siyahısı üçün təhlükəsizlik limitləri.
+# Klient `?limit=` göndərə bilər → server tərəfdə clamp edilir.
+MAX_ATTEMPT_ROWS = 200
+MAX_DETAIL_QUESTIONS = 300
+# `text_preview` DB-də 180 simvol saxlanılır; çıxışda da klip edilir.
+MAX_PREVIEW_LEN = 220
+# Cavab variantları (A/B/C…) maksimum 8 simvoldur (exams.py ilə eyni).
+MAX_OPTION_LEN = 8
+
 
 # ============================================================================
 # /me — Əsas analitika (statistika = yalnız 1-ci cəhdlər)
@@ -274,6 +283,223 @@ def get_my_analytics(current_user: dict = Depends(get_current_user)):
         "history": history,
         "ai_diagnosis": ai_diagnosis,
         "ai_available": is_configured(),
+    }
+
+
+# ============================================================================
+# CƏHD TARİXÇƏSİ — şagirdin öz sınaqlarına bəzə bilməsi üçün
+# ============================================================================
+
+@router.get("/attempts")
+def list_my_attempts(
+    limit: int = 60,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Şagirdin BÜTÜN cəhdləri (tarix sırası ilə) — analitika səhifəsinin
+    "Sınaqlarım" bölməsi üçün mənbə.
+
+    TƏHLÜKƏSİZLİK:
+      * `.eq("student_id", current_user["id"])` → IDOR qorunur: klient
+        `?student_id=` göndərə bilmir, parametr qəbul edilmir.
+      * `limit` clamp edilir → `?limit=999999` DoS yaratmır.
+      * `ai_analysis` (böyük JSON) SEÇİLMİR — yalnız `has_ai_analysis`
+        bayrağı hesablanır, yəni cavab ölçüsü məhdud saxlanılır.
+      * SQL miqrasiyası icra edilməyibsə `exam_results`-dan sintetik
+        cəhdlər qurulur (fail-soft, səhifə ÇÖKMƏR).
+    """
+    db = get_db()
+    student_id = current_user["id"]
+    safe_limit = max(1, min(int(limit or 60), MAX_ATTEMPT_ROWS))
+
+    rows: List[dict] = []
+    try:
+        res = db.table("exam_attempts").select(
+            "id, exam_id, attempt_no, is_primary, score, incorrect_count, empty_count, "
+            "total_questions, weak_topics, ai_analysis, ai_generated_at, created_at"
+        ).eq("student_id", student_id).order("created_at", desc=True) \
+            .limit(safe_limit).execute()
+        rows = res.data or []
+    except Exception:
+        logger.warning("attempts_list_table_missing", exc_info=True)
+        try:
+            fb = db.table("exam_results").select(
+                "id, exam_id, score, incorrect_count, empty_count, total_questions, "
+                "weak_topics, created_at"
+            ).eq("student_id", student_id).order("created_at", desc=True) \
+                .limit(safe_limit).execute()
+            rows = [{
+                "id": r.get("id"),
+                "exam_id": r.get("exam_id"),
+                "attempt_no": 1,
+                "is_primary": True,
+                "score": r.get("score") or 0,
+                "incorrect_count": r.get("incorrect_count") or 0,
+                "empty_count": r.get("empty_count") or 0,
+                "total_questions": r.get("total_questions") or 0,
+                "weak_topics": r.get("weak_topics") or [],
+                "ai_analysis": None,
+                "ai_generated_at": None,
+                "created_at": r.get("created_at"),
+            } for r in (fb.data or [])]
+        except Exception:
+            logger.warning("attempts_list_fallback_failed", exc_info=True)
+            rows = []
+
+    exam_ids = list({r.get("exam_id") for r in rows if r.get("exam_id")})
+    exams_map: Dict[str, dict] = {}
+    if exam_ids:
+        try:
+            ex = db.table("exams").select("id, title, subject").in_("id", exam_ids).execute()
+            exams_map = {e["id"]: e for e in (ex.data or [])}
+        except Exception:
+            exams_map = {}
+
+    attempts: List[dict] = []
+    for a in rows:
+        exam = exams_map.get(a.get("exam_id"), {})
+        tq = a.get("total_questions") or 0
+        sc = a.get("score") or 0
+        attempts.append({
+            "attempt_id": a.get("id"),
+            "exam_id": a.get("exam_id"),
+            "title": _clip(exam.get("title"), 200) or "Sınaq",
+            "subject": _clip(exam.get("subject"), 80) or "Digər",
+            "attempt_no": a.get("attempt_no") or 1,
+            "is_primary": bool(a.get("is_primary")),
+            "score": sc,
+            "incorrect_count": a.get("incorrect_count") or 0,
+            "empty_count": a.get("empty_count") or 0,
+            "total_questions": tq,
+            "percentage": round(sc / tq * 100, 1) if tq > 0 else 0,
+            # Səhvlər bar üzrə sürətli filtr üçün (AI sorğusu ODDİSTƏRİLMİR).
+            "has_mistakes": bool((a.get("incorrect_count") or 0) + (a.get("empty_count") or 0) > 0),
+            "has_ai_analysis": bool(a.get("ai_analysis")),
+            "ai_generated_at": a.get("ai_generated_at"),
+            "created_at": a.get("created_at"),
+        })
+
+    return {"attempts": attempts, "count": len(attempts)}
+
+
+@router.get("/attempts/{attempt_id}")
+def get_attempt_detail(
+    attempt_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    BİR cəhdin təfsilatı: sual üzrə nəticələr, şagirdin seçimi və düzgün cavab.
+
+    TƏHLÜKƏSİZLİK:
+      * `.eq("student_id", current_user["id"])` → başqa şagirdin cəhdinə
+        GÖRÜNÜR ZİNDƏ 404 qaytarılır (varlığı açıqlanmır).
+      * `answers` (bütün cavab xəritəsi) göndərilmir — yalnız sual üzrə
+        status + seçim/düzgün cavab. Minimum data prinsipi.
+      * `correct` variant mətnləri `MAX_OPTION_LEN` ilə kip edilir.
+    """
+    db = get_db()
+    student_id = current_user["id"]
+
+    try:
+        res = db.table("exam_attempts").select(
+            "id, exam_id, attempt_no, is_primary, score, incorrect_count, empty_count, "
+            "total_questions, question_details, weak_topics, ai_analysis, ai_model, "
+            "ai_generated_at, created_at"
+        ).eq("id", attempt_id).eq("student_id", student_id).limit(1).execute()
+        row = (res.data or [None])[0]
+    except Exception:
+        logger.warning("attempt_detail_table_missing", exc_info=True)
+        row = None
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Cəhd tapılmadı.")
+
+    exam: Dict[str, Any] = {}
+    try:
+        ex_res = db.table("exams").select("id, title, subject").eq(
+            "id", row.get("exam_id")
+        ).limit(1).execute()
+        exam = (ex_res.data or [{}])[0] or {}
+    except Exception:
+        logger.warning("attempt_detail_exam_meta_failed", exc_info=True)
+
+    questions: List[dict] = []
+    details = row.get("question_details") or []
+    if not isinstance(details, list):
+        details = []
+    for idx, d in enumerate(details[:MAX_DETAIL_QUESTIONS], start=1):
+        if not isinstance(d, dict):
+            continue
+        status_value = str(d.get("status") or "")
+        if status_value not in ("correct", "incorrect", "empty"):
+            status_value = "unknown"
+        chosen = _clip(d.get("chosen"), MAX_OPTION_LEN)
+        correct_opt = _clip(d.get("correct"), MAX_OPTION_LEN)
+        questions.append({
+            "number": idx,
+            "q_tag": _clip(d.get("q_tag"), 120) or "Qeyd olunmayan mövzu",
+            "status": status_value,
+            "chosen": chosen,
+            "correct": correct_opt,
+            "text_preview": _clip(d.get("text_preview"), MAX_PREVIEW_LEN),
+        })
+
+    return {
+        "attempt_id": row.get("id"),
+        "exam_id": row.get("exam_id"),
+        "title": _clip(exam.get("title"), 200) or "Sınaq",
+        "subject": _clip(exam.get("subject"), 80) or "Digər",
+        "attempt_no": row.get("attempt_no") or 1,
+        "is_primary": bool(row.get("is_primary")),
+        "score": row.get("score") or 0,
+        "incorrect_count": row.get("incorrect_count") or 0,
+        "empty_count": row.get("empty_count") or 0,
+        "total_questions": row.get("total_questions") or 0,
+        "percentage": (
+            round((row.get("score") or 0) / (row.get("total_questions") or 1) * 100, 1)
+            if (row.get("total_questions") or 0) > 0 else 0
+        ),
+        "weak_topics": row.get("weak_topics") or [],
+        # AI analiz eyni cavabda qaytarılır → "tarixçədən bax" AI XƏRCI ETMİR.
+        "ai_analysis": row.get("ai_analysis"),
+        "ai_model": row.get("ai_model"),
+        "ai_generated_at": row.get("ai_generated_at"),
+        "created_at": row.get("created_at"),
+        "questions": questions,
+    }
+
+
+@router.get("/attempts/{attempt_id}/ai-analysis")
+def get_cached_attempt_analysis(
+    attempt_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    SAXLANMIŞ AI analizini oxuyur — Gemini çağırılmir, rate-limit bucket-ı
+    tutulmur. Şagird "analiz tarixçəsindən" keçmiş analizləri pulsuz bələ edir.
+
+    TƏHLÜKƏSİZLİK: `.eq("student_id", ...)` → IDOR qorunur.
+    Analiz yoxdursa 404 (frontend "Analiz yoxdur" + yaratma düyməsi göstərir).
+    """
+    db = get_db()
+    try:
+        res = db.table("exam_attempts").select(
+            "ai_analysis, ai_model, ai_generated_at"
+        ).eq("id", attempt_id).eq("student_id", current_user["id"]).limit(1).execute()
+        row = (res.data or [None])[0]
+    except Exception:
+        logger.warning("cached_attempt_analysis_read_failed", exc_info=True)
+        row = None
+
+    if not row or not row.get("ai_analysis"):
+        raise HTTPException(status_code=404, detail="Bu cəhd üçün AI analiz yoxdur.")
+
+    return {
+        "attempt_id": attempt_id,
+        "analysis": row.get("ai_analysis"),
+        "cached": True,
+        "ai_model": row.get("ai_model"),
+        "generated_at": row.get("ai_generated_at"),
     }
 
 
