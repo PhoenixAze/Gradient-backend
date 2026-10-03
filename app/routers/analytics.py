@@ -73,7 +73,24 @@ def get_my_analytics(current_user: dict = Depends(get_current_user)):
         ).eq("student_id", student_id).order("created_at", desc=True).execute()
         attempts = attempts_res.data or []
     except Exception:
+        # Cədvəl yoxdursa `exam_results`-dan "sintetik" 1-ci cəhdlər qurulur.
+        # Bu, frontend-in AI düyməsinə `attempt_id` verməsini təmin edir —
+        # cədvəl olmadan da analiz işləsin (miqrasiya icrası gecikəndə).
+        # TƏHLÜKƏSİZLİK: yalnız öz sətirləri (`.eq("student_id", ...)`).
         attempts = []
+        if results:
+            attempts = [{
+                "id": r.get("id"),
+                "exam_id": r.get("exam_id"),
+                "attempt_no": 1,
+                "is_primary": True,
+                "score": r.get("score") or 0,
+                "incorrect_count": r.get("incorrect_count"),
+                "empty_count": r.get("empty_count"),
+                "total_questions": r.get("total_questions") or 0,
+                "question_details": None,
+                "ai_analysis": None,
+            } for r in results]
 
     if not results and not attempts:
         return _empty_payload()
@@ -377,15 +394,51 @@ async def analyze_attempt(
     student_id = current_user["id"]
 
     # Zero-Trust: başqa şagirdin attempt_id'si → 404 (varlığını açıqlamırıq)
-    attempt_res = db.table("exam_attempts").select(
-        "id, exam_id, attempt_no, score, incorrect_count, empty_count, total_questions, "
-        "question_details, weak_topics, ai_analysis, created_at"
-    ).eq("id", attempt_id).eq("student_id", student_id).limit(1).execute()
+    # DEPLOY TƏHLÜKƏSİZLİĞİ: `exam_attempts` cədvəli SQL miqrasiyası ilə
+    # yaradılır. Miqrasiya icra edilməyibsə sorğu exception atır → aşağıda
+    # `exam_results`-a fallback edilir ki, analiz funksiyası ÇÖKMƏSİN.
+    attempt = None
+    try:
+        attempt_res = db.table("exam_attempts").select(
+            "id, exam_id, attempt_no, score, incorrect_count, empty_count, total_questions, "
+            "question_details, weak_topics, ai_analysis, ai_model, ai_generated_at, created_at"
+        ).eq("id", attempt_id).eq("student_id", student_id).limit(1).execute()
+        if attempt_res.data:
+            attempt = attempt_res.data[0]
+    except Exception:
+        logger.warning("ai_analysis_attempts_table_missing", exc_info=True)
+        attempt = None
 
-    if not attempt_res.data:
-        raise HTTPException(status_code=404, detail="Analiz üçün cəhd tapılmadı.")
+    # FALLBACK: cəhd cədvəlində yoxdursa, `exam_results` sətrinə baxılır
+    # (miqrasiya icra edilməmiş və ya köhnə sıra yazılmamış ola bilər).
+    # TƏHLÜKƏSİZLİK: `.eq("student_id", student_id)` → IDOR qorunur.
+    if attempt is None:
+        fallback_res = db.table("exam_results").select(
+            "id, exam_id, score, incorrect_count, empty_count, total_questions, "
+            "weak_topics, created_at"
+        ).eq("id", attempt_id).eq("student_id", student_id).limit(1).execute()
 
-    attempt = attempt_res.data[0]
+        if not fallback_res.data:
+            raise HTTPException(status_code=404, detail="Analiz üçün cəhd tapılmadı.")
+
+        row = fallback_res.data[0]
+        attempt = {
+            "id": row.get("id"),
+            "exam_id": row.get("exam_id"),
+            "attempt_no": 1,
+            "score": row.get("score") or 0,
+            "incorrect_count": row.get("incorrect_count"),
+            "empty_count": row.get("empty_count"),
+            "total_questions": row.get("total_questions") or 0,
+            # `exam_results`-də per-sual məlumat yoxdur → `_build_attempt_prompt`
+            # aqreqat göstəricilərə görə analiz yazacaq (səhv yoxdur).
+            "question_details": None,
+            "weak_topics": row.get("weak_topics") or [],
+            "ai_analysis": None,
+            "ai_model": None,
+            "created_at": row.get("created_at"),
+            "_from_results": True,
+        }
 
     # Cache: eyni cəhd üçün analiz artıq yaradılıbsa, yenidən API xərci etmirik
     if attempt.get("ai_analysis") and not payload.force:
@@ -419,16 +472,19 @@ async def analyze_attempt(
     # sadəcə loglayırıq — analiz "itə bilən" nadir hadisədir.
     # TƏHLÜKƏSİZLİK: yazma `.eq("student_id", student_id)` ilə məhdudlaşır →
     # klient başqa şagirdin cəhdinə yaza bilmir (IDOR qoruması).
-    try:
-        db.table("exam_attempts").update({
-            "ai_analysis": data,
-            "ai_model": model,
-            "ai_generated_at": _now_iso(),
-        }).eq("id", attempt_id).eq("student_id", student_id).execute()
-    except Exception:
-        # TƏHLÜKƏSİZLİK: xəta detalları (DB mesajı, sütun adları) cavabda
-        # və istifadəçiyə sızdırılmaz — yalnız server logunda qalır.
-        logger.warning("ai_analysis_cache_write_failed scope=attempt", exc_info=True)
+    # `exam_attempts` cədvəli yoxdursa cache yazıla bilməz — amma cavab
+    # frontend-ə qaytarılır, beləliklə istifadəçi analizi görür.
+    if not attempt.get("_from_results"):
+        try:
+            db.table("exam_attempts").update({
+                "ai_analysis": data,
+                "ai_model": model,
+                "ai_generated_at": _now_iso(),
+            }).eq("id", attempt_id).eq("student_id", student_id).execute()
+        except Exception:
+            # TƏHLÜKƏSİZLİK: xəta detalları (DB mesajı, sütun adları) cavabda
+            # və istifadəçiyə sızdırılmaz — yalnız server logunda qalır.
+            logger.warning("ai_analysis_cache_write_failed scope=attempt", exc_info=True)
 
     return {
         "attempt_id": attempt_id,
