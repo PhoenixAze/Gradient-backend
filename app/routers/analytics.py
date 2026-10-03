@@ -52,11 +52,17 @@ def get_my_analytics(current_user: dict = Depends(get_current_user)):
     student_id = current_user["id"]
 
     # 1) Əsas statistika — 1-ci cəhdlər
-    results_res = db.table("exam_results").select(
-        "id, exam_id, score, incorrect_count, empty_count, total_questions, weak_topics, created_at"
-    ).eq("student_id", student_id).order("created_at", desc=True).execute()
-
-    results = results_res.data or []
+    # TƏHLÜKƏSİZLİK: sorğu uğursuz olsa 500 atmaqdansa boş struktur qaytarılır —
+    # analitika səhifəsi ÇÖKMƏMƏLİDİR (defense-in-depth: daxili xəta istifadəçini
+    # "sıfır sınaq" göstərməsin, çünki bu, real məlumat itkisidir).
+    try:
+        results_res = db.table("exam_results").select(
+            "id, exam_id, score, incorrect_count, empty_count, total_questions, weak_topics, created_at"
+        ).eq("student_id", student_id).order("created_at", desc=True).execute()
+        results = results_res.data or []
+    except Exception:
+        logger.error("analytics_me_results_query_failed", exc_info=True)
+        return _empty_payload()
 
     # Cəhd məlumatları (təkrar cəhdlər daxil) — mövzu statistikası üçün
     # DIQQET: `has_ai` adlı sütun YOXDUR — belə sütun seçilməsi PostgREST-də
@@ -100,8 +106,13 @@ def get_my_analytics(current_user: dict = Depends(get_current_user)):
     exam_ids |= {a["exam_id"] for a in attempts if a.get("exam_id")}
     exams_map: Dict[str, dict] = {}
     if exam_ids:
-        exams_res = db.table("exams").select("id, title, subject, question_count").in_("id", list(exam_ids)).execute()
-        exams_map = {e["id"]: e for e in (exams_res.data or [])}
+        try:
+            exams_res = db.table("exams").select("id, title, subject, question_count").in_("id", list(exam_ids)).execute()
+            exams_map = {e["id"]: e for e in (exams_res.data or [])}
+        except Exception:
+            # Başlıq/fənn metadata olmasa da sıra statistikası işləməlidir.
+            logger.warning("analytics_me_exams_query_failed", exc_info=True)
+            exams_map = {}
 
     # 3) Cəhd indeksini qur (exam_id → attempt list) — sürətli UI render üçün
     attempts_by_exam: Dict[str, List[dict]] = {}
@@ -455,9 +466,16 @@ async def analyze_attempt(
             detail="AI analiz xidməti hazırda konfiqurasiya edilməyib.",
         )
 
-    # Sınaq meta məlumatı (başlıq + fənn) — AI-ya kontekst verir
-    exam_res = db.table("exams").select("id, title, subject, grade").eq("id", attempt["exam_id"]).limit(1).execute()
-    exam = (exam_res.data or [{}])[0] or {}
+    # Sınaq meta məlumatı (başlıq + fənn) — AI-ya kontekst verir.
+    # DIQQƏT: `grade` sütunu `exams` cədvəlində YOXDUR (bütün digər
+    # router-lər onu seçmir). PostgREST mövcud olmayan sütunu seçdikdə
+    # 400 qaytarır → endpoint 500 atır → "məlumat yüklənmədi".
+    exam = {}
+    try:
+        exam_res = db.table("exams").select("id, title, subject").eq("id", attempt["exam_id"]).limit(1).execute()
+        exam = (exam_res.data or [{}])[0] or {}
+    except Exception:
+        logger.warning("ai_analysis_exam_meta_failed", exc_info=True)
 
     user_content = _build_attempt_prompt(attempt, exam)
     data, model = generate_json(_EXAM_SYSTEM_PROMPT, user_content)
