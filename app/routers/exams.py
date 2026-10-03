@@ -395,14 +395,43 @@ def get_exam_attempts(exam_id: str, current_user: dict = Depends(get_current_use
         raise HTTPException(status_code=404, detail="Sınaq tapılmadı.")
     exam = exam_res.data[0]
 
-    attempts_res = db.table("exam_attempts").select(
-        "id, exam_result_id, attempt_no, is_primary, score, incorrect_count, "
-        "empty_count, total_questions, weak_topics, ai_analysis, ai_model, created_at"
-    ).eq("exam_id", exam_id).eq("student_id", current_user["id"]) \
-        .order("attempt_no", desc=True).limit(MAX_ATTEMPT_HISTORY).execute()
+    # DEPLOY TƏHLÜKƏSİZLİĞİ: `exam_attempts` SQL miqrasiyası ilə yaradılır.
+    # Miqrasiya hələ icra edilməyibsə endpoint 500 atmasın — əksinə köhnə
+    # `exam_results` cədvəlindən "sintetik" 1-ci cəhd qurulur ki, frontend-in
+    # AI analiz düyməsi ölü qalmasın və istifadəçi boş paneldə qalmasın.
+    try:
+        attempts_res = db.table("exam_attempts").select(
+            "id, exam_result_id, attempt_no, is_primary, score, incorrect_count, "
+            "empty_count, total_questions, weak_topics, ai_analysis, ai_model, created_at"
+        ).eq("exam_id", exam_id).eq("student_id", current_user["id"]) \
+            .order("attempt_no", desc=True).limit(MAX_ATTEMPT_HISTORY).execute()
+        raw_attempts = attempts_res.data or []
+    except Exception:
+        raw_attempts = []
+        fallback_res = db.table("exam_results").select(
+            "id, score, incorrect_count, empty_count, total_questions, weak_topics, created_at"
+        ).eq("exam_id", exam_id).eq("student_id", current_user["id"]) \
+            .order("created_at", desc=True).limit(1).execute()
+
+        fallback = (fallback_res.data or [None])[0]
+        if fallback:
+            raw_attempts = [{
+                "id": fallback.get("id"),
+                "exam_result_id": fallback.get("id"),
+                "attempt_no": 1,
+                "is_primary": True,
+                "score": fallback.get("score") or 0,
+                "incorrect_count": fallback.get("incorrect_count") or 0,
+                "empty_count": fallback.get("empty_count") or 0,
+                "total_questions": fallback.get("total_questions") or 0,
+                "weak_topics": fallback.get("weak_topics") or [],
+                "ai_analysis": None,
+                "ai_model": None,
+                "created_at": fallback.get("created_at"),
+            }]
 
     attempts = []
-    for a in (attempts_res.data or []):
+    for a in raw_attempts:
         tq = a.get("total_questions") or 0
         sc = a.get("score") or 0
         attempts.append({

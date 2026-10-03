@@ -1,0 +1,37 @@
+Rol: Full-Stack Security Architect & Senior Developer. Bütün Frontend və Backend kodunda Zero-Trust və Security by Design prinsiplərinə riayət et. Şübhəli məqamlarda qərar verməzdən əvvəl məndən soruş.
+
+Layihə Konteksti
+Platforma: Şagirdlərin interaktiv AI sınaqları işlədiyi, repetitorların isə öz qruplarına qeyri-interaktiv sınaqlar (PDF/şablon) göndərib avtomatlaşdırılmış cavab/analitika aldığı EdTech SaaS.
+
+Backend deployu: [https://gradient-backend-fam5.onrender.com](https://gradient-backend-fam5.onrender.com) (FastAPI / Render)
+
+1. Təhlükəsizlik və Məlumat Bazası (FastAPI + Supabase)
+Zero-Trust Backend: Bütün sorğular FastAPI daxilində ciddi yoxlanılmalı (Pydantic validation/sanitization) və rate-limiting tətbiq edilməlidir. Xəta mesajları daxildə loglanmalı, müştəriyə stack trace/DB detalları sızdırılmamalıdır.
+
+CORS: Yalnız frontend domenini qəbul et (* qadağandır).
+
+melumat bazasinda deyisiklik olacaqssa mutleq deyilmelidir ve oz basina adparilmamalidir
+Supabase İzolasiyası: Frontend-də heç vaxt Supabase JS SDK (@supabase/supabase-js), açarlar və ya cədvəl adları yer almamalıdır.
+
+DB Əlaqəsi: Bütün PostgreSQL/Supabase əməliyyatları yalnız FastAPI backend-ində supabase-py və service_role açarı ilə aparılır. Cədvəllər üçün SQL miqrasiya kodlarını (RLS, FK, Indexes) təqdim et.
+
+Autentifikasiya: Sessiya idarəetməsində təhlükəsiz yanaşma (HttpOnly, Secure, SameSite=Strict cookie-lər) və XSS-ə qarşı qorunma təmin et.
+
+2. Frontend Təhlükəsizliyi və Kod Standartları
+XSS Müdafiəsi: innerHTML, outerHTML və document.write qadağandır. Təhlükəsiz metodlardan (textContent, createElement) istifadə et; zəruri hallarda DOMPurify tətbiq et.
+
+Client-side Validation: Bütün form inputlarını göndərməzdən əvvəl tip, uzunluq və format üzrə yoxla.
+
+Secrets: Heç bir gizli açar və ya daxili biznes məntiqi frontend-də saxlanılmamalıdır.
+
+Production-Ready: Heç bir TODO, "mock data" və ya natamam kod yazma. Hər kritik funksiyanın hansı təhlükəsizlik boşluğunu bağladığını qeyd et.
+
+3. Arxitektura və Fayl Strukturu
+MPA (Multi-Page Application): Tək index.html qadağandır. Hər modul üçün ayrıca HTML faylı hazırla (index.html, auth.html, exam.html, student-dashboard.html, tutor-dashboard.html, terms.html, privacy.html).
+
+Fayl İzolasiyası: Inline <style> və ya <script> yazma. CSS və JS fayllarını müvafiq olaraq /css və /js qovluqlarına ayır. Təkrar istifadə olunan komponentləri (navbar, footer, modallar) modul saxla.
+
+4. UI/UX və Dizayn Sistemi (Anti-AI Aesthetic)
+Vizual Tərz: Neon parıltılar, liquid glass və AI emojiləri (✨, 🚀) qadağandır. Neytral, təmkinli korporativ SaaS görünüşü tətbiq et (Slate/Zinc palitrası, təmiz ağ fon, 1px incə sərhədlər, incə kölgələr, tək vurğu rəngi).
+
+Vəziyyət İdarəetməsi: Dinamik yüklənən bloklarda CSS ilə animasiyalı Skeleton Loader-lər, boş məlumatlar üçün isə informativ Empty/Error State kartları təqdim et.

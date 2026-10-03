@@ -45,10 +45,14 @@ _API_KEY_ENV_NAMES: Tuple[str, ...] = (
 )
 
 # Sıra = prioritet. Əvvəlcə bahalı deyil, sürətli model; sonra ehtiyat.
+# QEYD: dayandırılmış model adları (gemini-1.5-flash, gemini-2.0-flash)
+# API tərəfindən 404 qaytarır → bütün siyahı boş qalır → analiz heç vaxt
+# uğurlu olmur. Buna görə yalnız aktiv modellər saxlanılır.
 _MODELS: Tuple[str, ...] = (
-    "gemini-2.0-flash",
+    "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
-    "gemini-1.5-flash",
+    "gemini-2.0-flash",
+    "gemini-flash-latest",
 )
 
 _API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models"

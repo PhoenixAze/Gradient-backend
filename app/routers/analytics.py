@@ -13,7 +13,10 @@ TƏHLÜKƏSİZLİK (.clinerules §1):
 """
 
 import json
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -22,6 +25,8 @@ from app.core.gemini import generate_json, is_configured
 from app.core.rate_limit import rate_limit
 from app.database import get_db
 from app.security import get_current_user
+
+logger = logging.getLogger("gradient.analytics")
 
 router = APIRouter(prefix="/api/v1/analytics", tags=["Analytics"])
 
@@ -165,6 +170,10 @@ def get_my_analytics(current_user: dict = Depends(get_current_user)):
         history.append({
             "id": r["id"],
             "exam_id": r["exam_id"],
+            # `attempt_id` → frontend "AI Analiz" düyməsini bu ID ilə çağırır.
+            # `exam_attempts` cədvəli mövcud deyilsə None qaytarılır (aşağıda
+            # təhlükəsiz fallback sətri yaradılır).
+            "attempt_id": (primary or {}).get("id"),
             "title": exam.get("title", "Sınaq"),
             "subject": exam.get("subject", "Digər"),
             "score": score,
@@ -176,6 +185,9 @@ def get_my_analytics(current_user: dict = Depends(get_current_user)):
             "attempt_no": (primary or {}).get("attempt_no", 1),
             "has_ai_analysis": bool((primary or {}).get("ai_analysis")),
             "retake_count": len(retakes),
+            # `exam_attempts` cədvəli yoxdursa frontend üçün cəhd məlumatı
+            # lazımdır ki, AI düyməsi "tapılmadı" deyib ölü qalmasın.
+            "attempts_known": bool(exam_attempts),
         })
 
     # 6) Fənn statistikası
@@ -235,6 +247,18 @@ def get_my_analytics(current_user: dict = Depends(get_current_user)):
         "ai_diagnosis": ai_diagnosis,
         "ai_available": is_configured(),
     }
+
+
+def _now_iso() -> str:
+    """
+    DB-yə yazılacaq timestamptz dəyəri.
+
+    TƏHLÜKƏSİZLİK/KİMLİK: `now()` SQL funksiyası PostgREST JSON gövəsində
+    CAST OLUNMUR — göndərilən "now()" mətni timestamptz sütununa yazılmağa
+    çalışanda xəta verir və bütün analiz yazımı itir. Buna görə ISO-8601
+    UTC dəyəri hesablanıb göndərilir.
+    """
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _empty_payload() -> dict:
@@ -393,15 +417,18 @@ async def analyze_attempt(
 
     # DB-yə yazmaq UĞURSUZ olsa belə cavabı itirmirik (frontend göstərə bilir),
     # sadəcə loglayırıq — analiz "itə bilən" nadir hadisədir.
+    # TƏHLÜKƏSİZLİK: yazma `.eq("student_id", student_id)` ilə məhdudlaşır →
+    # klient başqa şagirdin cəhdinə yaza bilmir (IDOR qoruması).
     try:
         db.table("exam_attempts").update({
             "ai_analysis": data,
             "ai_model": model,
-            "ai_generated_at": "now()",
+            "ai_generated_at": _now_iso(),
         }).eq("id", attempt_id).eq("student_id", student_id).execute()
     except Exception:
-        # TƏHLÜKƏSİZLİK: xəta detalları cavabda sızdırılmaz.
-        pass
+        # TƏHLÜKƏSİZLİK: xəta detalları (DB mesajı, sütun adları) cavabda
+        # və istifadəçiyə sızdırılmaz — yalnız server logunda qalır.
+        logger.warning("ai_analysis_cache_write_failed scope=attempt", exc_info=True)
 
     return {
         "attempt_id": attempt_id,
@@ -566,14 +593,14 @@ async def analyze_overall(
         },
         "ai_model": model,
         "version": int((existing or {}).get("version") or 0) + 1,
-        "updated_at": "now()",
+        "updated_at": _now_iso(),
     }
 
     try:
         # Təhlükəsiz yazma: upsert yalnız öz sətrinə (student_id) — IDOR yoxdur.
         db.table("student_ai_insights").upsert(row, on_conflict="student_id").execute()
     except Exception:
-        pass
+        logger.warning("ai_analysis_cache_write_failed scope=overall", exc_info=True)
 
     return {
         "has_analysis": True,
