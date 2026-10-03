@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.rate_limit import apply_rate_limits
-from app.routers import auth, users, exams, debug, settings, analytics, tutor, tutor_group
+from app.routers import auth, users, exams, debug, settings, analytics, tutor, tutor_group, plans
 
 app = FastAPI(
     title="Gradient EdTech API",
@@ -57,6 +57,13 @@ _rate_limited_analytics_routes = apply_rate_limits(analytics.router)
 # yəni bütün debug endpoint-ləri limitsiz və bloklayıcı cəzasız qalardı.
 _rate_limited_debug_routes = apply_rate_limits(debug.router)
 
+# Abunə planları endpoint-ləri (`/api/v1/plans`).
+# BU ÇAĞRI MÜHİMDÜR: `apply_rate_limits` dekoratoru real `Depends(...)`
+# asılılığına çevirir və limiti autentifikasiyadan ƏVVƏL yoxlayır.
+# Çağrılmasa, `@rate_limit("read"/"write")` heç vaxt icra olunmaz —
+# yəni plan endpoint-ləri limitsiz və bloklayıcı cəzasız qalardı.
+_rate_limited_plans_routes = apply_rate_limits(plans.router)
+
 app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(exams.router)
@@ -65,6 +72,7 @@ app.include_router(analytics.router)
 app.include_router(tutor.router)
 app.include_router(debug.router)
 app.include_router(tutor_group.router, prefix="/api/v1/tutor-group", tags=["tutor-group"])
+app.include_router(plans.router, prefix="/api/v1/plans", tags=["plans"])
 
 @app.get("/api/health")
 def health_check():

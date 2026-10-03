@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field, field_validator
 from supabase import Client
 
 from app.core.config import settings
+from app.core.plans import PlanLimitError, enforce_student_limit
 from app.core.rate_limit import rate_limit
 from app.core.security import get_supabase_admin, require_tutor, require_user
 from app.core.tutor_code import get_or_create_tutor_code
@@ -314,6 +315,28 @@ async def add_student(
 
     if student.get("tutor_id") == tutor_id:
         raise _fail("Şagird artıq bu qrupdadır", 409)
+
+    # PLAN LIMITI (.clinerules §1 — Security by Design):
+    # Free planda maksimum 5 şagird. Limit aşıldıqda endpoint 402 qaytarır
+    # və frontend istifadəçini `plans.html` səhifəsinə yönləndirir.
+    #
+    # YOXLAMA QAYDASI: limit ŞAGİRD tapıldıqdan SONRA, hər hansı bir
+    # DB yazma əməliyyatından ƏVVƏL icra olunur → limit aşıldıqda heç bir
+    # məlumat dəyişmir (yarım əməliyyat yaranmır).
+    try:
+        enforce_student_limit(db, tutor_id)
+    except PlanLimitError as limit_err:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail={
+                "code": limit_err.code,
+                "message": limit_err.message,
+                "limit": limit_err.limit,
+                "used": limit_err.used,
+                "upgrade_suggested": True,
+                "upgrade_url": "plans.html",
+            },
+        )
 
     try:
         # Köhnə qrupdakı pending istəkləri ləğv edilir

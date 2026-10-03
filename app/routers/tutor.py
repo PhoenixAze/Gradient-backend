@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
+from app.core.plans import PlanLimitError, enforce_exam_limit, increment_exam_usage
 from app.core.tutor_code import get_or_create_tutor_code
 from app.database import get_db
 from app.security import get_current_user, get_password_hash, verify_password
@@ -1213,6 +1214,28 @@ class AIGenerateAnswersPayload(BaseModel):
 def create_tutor_assignment(payload: CreateAssignmentPayload, current_user: dict = Depends(get_current_user)):
     db = get_db()
     _ensure_tutor_role(current_user, db)
+
+    # PLAN LIMITI (.clinerules §1 — Security by Design):
+    # Free planda aylıq 2 sınaq yaratma/yükləmə haqqı var. Limit aşıldıqda
+    # endpoint 402 qaytarır və frontend istifadəçini `plans.html`-ə yönləndirir.
+    #
+    # YOXLAMA QAYDASI: limit hər hansı bir DB yazma əməliyyatından ƏVVƏL
+    # icra olunur → limit aşıldıqda yarım sınaq qalığı yaranmır.
+    try:
+        enforce_exam_limit(db, current_user["id"])
+    except PlanLimitError as limit_err:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail={
+                "code": limit_err.code,
+                "message": limit_err.message,
+                "limit": limit_err.limit,
+                "used": limit_err.used,
+                "upgrade_suggested": True,
+                "upgrade_url": "plans.html",
+            },
+        )
+
     cleaned_key = {}
     for k, v in payload.answer_key.items():
         k_str = str(k).strip()
@@ -1244,6 +1267,12 @@ def create_tutor_assignment(payload: CreateAssignmentPayload, current_user: dict
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Sınaq yaradılarkən xəta baş verdi. Zəhmət olmasa yenidən cəhd edin."
         )
+
+    # Aylıq sayğacı artır (UPSERT — yalnız artırma, heç nə silinmir).
+    # Uğursuz olsa da sınaq onsuz da yaradılıb; xəta jurnala düşür,
+    # istifadəçi əməliyyatdan qəcut deyil.
+    increment_exam_usage(db, current_user["id"])
+
     return {
         "success": True,
         "message": "Sınaq uğurla yaradıldı!",
