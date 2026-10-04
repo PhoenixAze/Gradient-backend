@@ -10,10 +10,11 @@ TƏHLÜKƏSİZLİK İZAHI (.clinerules §1 — Zero-Trust / Security by Design):
   * **Frontend heç vaxt öz planını yaza bilmir.** Plan dəyişikliyi yalnız
     admin tərəfdən (Supabase SQL / service_role) edilir. İstifadəçi yalnız
     "yüksəltmə sorğusu" göndərə bilər (aşağıda `create_upgrade_request`).
-  * **Fail-closed limitlər:** plan sətiri tapılmasa və ya katalog boş olsa,
-    `enforce_student_limit` / `enforce_exam_limit` BLOKLAMAZ — əksinə,
-    funksiya "limitsiz" fallback *etmir* və səhv qaytarır. Real qorunma
-    DB-dəki `tutor_plans` sətrinə əsaslanır.
+  * **Fail-closed limitlər:** plan sətiri tapılmasa, katalog boş olsa və ya
+    DB sorğusu xəta verərsə, `enforce_student_limit` / `enforce_exam_limit`
+    heç vaxt "limitsiz" fallback ETMİR — əvəzinə Free səviyyəsinin sabit
+    limitlərini (`FREE_FALLBACK_LIMITS`) tətbiq edir. Bu, DB əlçatmaz
+    olduqda da ödənişsiz limitsiz istifadə boşluğunu bağlayır.
   * **Abunə bitməsi (expiry):** `plan_expires_at` keçmiş tarixdirsə, limitlər
     Free səviyyəsinə qaytarılır. Bu, "ödəniş bitdi → imtiyaz davam edir"
     boşluğunu bağlayır.
@@ -22,7 +23,7 @@ TƏHLÜKƏSİZLİK İZAHI (.clinerules §1 — Zero-Trust / Security by Design):
   * **Sətirlər silinmir:** yalnız oxuma (SELECT) və ehtiyat sayğac
     artırması (UPSERT) edilir — heç bir DELETE/UPDATE məlumat sətrini yox etmir.
 
-MİQRASİYA: supabase/migrations/20261003000000_tutor_subscription_plans.sql
+MİQRASİYA: supabase/migrations/20261005000000_full_pro_plan_and_discounts.sql
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ PLAN_FREE = "free"
 PLAN_STANDARD = "standard"
 PLAN_PRO = "pro"
 PLAN_PRO_PLUS = "pro_plus"
+PLAN_FULL_PRO = "full_pro"
 
 #: Plan yüksəltmə İSTİSMİYATI — yalnız yuxarıya hərəkət icazəlidir.
 #: İstifadəçi öz planını "downgrade" edə bilməz (bu, admin işidir).
@@ -51,9 +53,16 @@ PLAN_RANK: dict[str, int] = {
     PLAN_STANDARD: 1,
     PLAN_PRO: 2,
     PLAN_PRO_PLUS: 3,
+    PLAN_FULL_PRO: 4,
 }
 
 VALID_PLAN_IDS = frozenset(PLAN_RANK.keys())
+
+#: FAIL-CLOSED sabitləri — DB-yə çıxış mümkün olmadıqda tətbiq olunur.
+#: ⚠️ Hər iki dəyər `None` DEYİL, çünki `None` = "limitsiz" deməkdir və
+#:    DB xətası ödənişsiz limitsiz giriş yaradardı (fail-OPEN boşluğu).
+FREE_FALLBACK_MAX_STUDENTS = 5
+FREE_FALLBACK_MAX_EXAMS = 2
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +107,8 @@ def fetch_plans(db: Client, only_active: bool = True) -> list[dict[str, Any]]:
         query = (
             db.table("tutor_plans")
             .select(
-                "id, display_name, price_azn, max_students, "
+                "id, display_name, price_azn, original_price_azn, "
+                "discount_percent, max_students, "
                 "max_exams_per_month, description, sort_order"
             )
             .order("sort_order", desc=False)
@@ -107,9 +117,66 @@ def fetch_plans(db: Client, only_active: bool = True) -> list[dict[str, Any]]:
             query = query.eq("is_active", True)
         rows = query.execute().data or []
     except Exception:
-        logger.exception("plans.fetch_plans failed")
-        return []
+        # Miqrasiya hələ icra olunmamış ola bilər (yeni sütunlar yoxdur)
+        # → köhnə sütunlarla təkrar cəhd, uğursuz olsa boş siyahı.
+        logger.exception("plans.fetch_plans failed (retry without discount columns)")
+        try:
+            rows = (
+                db.table("tutor_plans")
+                .select(
+                    "id, display_name, price_azn, max_students, "
+                    "max_exams_per_month, description, sort_order"
+                )
+                .order("sort_order", desc=False)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            logger.exception("plans.fetch_plans failed (legacy columns)")
+            return []
     return [_public_plan(r) for r in rows]
+
+
+def _to_float(value: Any) -> Optional[float]:
+    """DB `numeric` dəyərini float-a çevirir (xəta olanda None qaytarır)."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int(value: Any) -> Optional[int]:
+    """DB `integer` dəyərini int-ə çevirir (xəta olanda None qaytarır)."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _free_fallback_plan() -> dict[str, Any]:
+    """DB əlçatmaz olanda istifadə olunan FAIL-CLOSED Free plan.
+
+    ⚠️ Hər iki limit `None` DEYİL. `None` = "limitsiz" deməkdir; DB xətası
+    zamanı `None` qaytarmaq ödənişsiz limitsiz giriş yaradardı.
+    """
+    return {
+        "id": PLAN_FREE,
+        "name": "Free",
+        "price": 0.0,
+        "original_price": None,
+        "discount_percent": 0,
+        "max_students": FREE_FALLBACK_MAX_STUDENTS,
+        "max_exams_per_month": FREE_FALLBACK_MAX_EXAMS,
+        "unlimited_students": False,
+        "unlimited_exams": False,
+        "description": "Kiqik qruplar üçün başlanğıc plan",
+        "is_fallback": True,
+    }
 
 
 def _public_plan(row: dict[str, Any]) -> dict[str, Any]:
@@ -117,26 +184,45 @@ def _public_plan(row: dict[str, Any]) -> dict[str, Any]:
 
     `numeric` tipli qiymətlər JSON-da float ola bilər — hər zaman float-a
     çevrilir ki, frontend-da `29.99` kimi görünsün (19.9900001 yoxdur).
+
+    `original_price` / `discount_percent` yalnız UI göstəriliyi üçündür
+    (50% endirim nişanı); ödəniş məntiqi `price` dəyərindən istifadə edir.
     """
-    price = row.get("price_azn")
-    try:
-        price = float(price) if price is not None else 0.0
-    except (TypeError, ValueError):
+    price = _to_float(row.get("price_azn"))
+    if price is None:
         logger.warning("plans.bad_price_value id=%s", row.get("id"))
         price = 0.0
 
-    max_students = row.get("max_students")
-    max_exams = row.get("max_exams_per_month")
+    original_price = _to_float(row.get("original_price_azn"))
+
+    discount_percent = _to_int(row.get("discount_percent")) or 0
+    if discount_percent < 0 or discount_percent > 90:
+        discount_percent = 0
+
+    # Endirim məntiqi: orijinal qiymət verilməyibsə, ödəniş qiymətindən
+    # hesablanır (price = original * (1 - discount/100)).
+    if original_price is None and discount_percent > 0 and price > 0:
+        original_price = round(price / (1 - discount_percent / 100), 2)
+
+    # Təhlükəsizlik: endirim olmadan orijinal qiymət göstərilmir.
+    if not discount_percent:
+        original_price = None
+
+    max_students = _to_int(row.get("max_students"))
+    max_exams = _to_int(row.get("max_exams_per_month"))
 
     return {
         "id": row.get("id"),
         "name": row.get("display_name") or row.get("id"),
         "price": round(price, 2),
-        "max_students": int(max_students) if max_students is not None else None,
-        "max_exams_per_month": int(max_exams) if max_exams is not None else None,
+        "original_price": round(original_price, 2) if original_price is not None else None,
+        "discount_percent": discount_percent,
+        "max_students": max_students,
+        "max_exams_per_month": max_exams,
         "unlimited_students": max_students is None,
         "unlimited_exams": max_exams is None,
         "description": row.get("description") or "",
+        "is_fallback": False,
     }
 
 
@@ -148,7 +234,8 @@ def get_plan_by_id(db: Client, plan_id: str) -> Optional[dict[str, Any]]:
         row = (
             db.table("tutor_plans")
             .select(
-                "id, display_name, price_azn, max_students, "
+                "id, display_name, price_azn, original_price_azn, "
+                "discount_percent, max_students, "
                 "max_exams_per_month, description, sort_order"
             )
             .eq("id", plan_id)
@@ -175,7 +262,7 @@ def get_effective_plan(db: Client, tutor_id: str) -> dict[str, Any]:
     qaytarılır və `expired: True` işarələnir. Bu, vaxtı bitmiş pullu planın
     limitlərini saxlamağın qarşısını alır.
     """
-    fallback = _public_plan({"id": PLAN_FREE, "display_name": "Free", "price_azn": 0})
+    fallback = _free_fallback_plan()
 
     try:
         row = (
@@ -188,7 +275,7 @@ def get_effective_plan(db: Client, tutor_id: str) -> dict[str, Any]:
         )
     except Exception:
         logger.exception("plans.get_effective_plan failed tutor_id=%s", tutor_id)
-        return {**fallback, "expired": False, "plan_expires_at": None}
+        return {**fallback, "expired": False, "plan_expires_at": None, "degraded": True}
 
     if not row:
         logger.warning("plans.tutor_row_missing tutor_id=%s", tutor_id)
