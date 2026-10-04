@@ -22,11 +22,11 @@ TƏHLÜKƏSİZLİK (.clinerules §1 — Zero-Trust Backend):
     iç səhv `logger.exception` ilə jurnala düşür.
 
 ENDPOINT-LƏR:
-  GET  /api/v1/plans                 → plan kataloqu (bütün 5 plan)
+  GET  /api/v1/plans                 → plan kataloqu (free | standard | pro)
   GET  /api/v1/plans/me              → cari plan + limitlər + istifadə
   POST /api/v1/plans/upgrade-request → yüksəltmə sorğusu (WhatsApp mesajı üçün)
 
-MİQRASİYA: supabase/migrations/20261005000000_full_pro_plan_and_discounts.sql
+MİQRASİYA: supabase/migrations/20261006000000_two_paid_plans.sql
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ CONTACT_HINT_RE = re.compile(r"^[0-9a-zA-Z+()\s@._-]{0,160}$")
 class UpgradeRequestIn(BaseModel):
     """Yüksəltmə sorğusunun gövdəsi."""
 
-    desired_plan: Literal["standard", "pro", "pro_plus", "full_pro"]
+    desired_plan: Literal["standard", "pro"]
     contact_hint: Optional[str] = Field(default=None, max_length=CONTACT_HINT_MAX)
 
     @field_validator("contact_hint")

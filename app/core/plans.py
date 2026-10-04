@@ -23,7 +23,7 @@ TƏHLÜKƏSİZLİK İZAHI (.clinerules §1 — Zero-Trust / Security by Design):
   * **Sətirlər silinmir:** yalnız oxuma (SELECT) və ehtiyat sayğac
     artırması (UPSERT) edilir — heç bir DELETE/UPDATE məlumat sətrini yox etmir.
 
-MİQRASİYA: supabase/migrations/20261005000000_full_pro_plan_and_discounts.sql
+MİQRASİYA: supabase/migrations/20261006000000_two_paid_plans.sql
 """
 
 from __future__ import annotations
@@ -43,20 +43,32 @@ logger = logging.getLogger("gradient.plans")
 PLAN_FREE = "free"
 PLAN_STANDARD = "standard"
 PLAN_PRO = "pro"
-PLAN_PRO_PLUS = "pro_plus"
-PLAN_FULL_PRO = "full_pro"
 
 #: Plan yüksəltmə İSTİSMİYATI — yalnız yuxarıya hərəkət icazəlidir.
 #: İstifadəçi öz planını "downgrade" edə bilməz (bu, admin işidir).
+#:
+#: ⚠️ Katalog artıq SADƏCƏ 3 plandan ibarətdir: free | standard | pro.
+#:    `standard` = 20 şagirdə qədər + ayda 15 sınaq.
+#:    `pro`      = limitsiz şagird + LIMITSİZ sınaq.
 PLAN_RANK: dict[str, int] = {
     PLAN_FREE: 0,
     PLAN_STANDARD: 1,
     PLAN_PRO: 2,
-    PLAN_PRO_PLUS: 3,
-    PLAN_FULL_PRO: 4,
 }
 
 VALID_PLAN_IDS = frozenset(PLAN_RANK.keys())
+
+#: KÖHNƏ plan açarları (miqrasiya #20261006000000-dən əvvəl aktiv idi).
+#:
+#: DB-də hələ köhnə dəyər qalan sətirlər olsa (miqrasiya tam icra edilməmişsə
+#: və ya `is_active=false` olan arxiv sətirləri), səhifə sınmasın deyə
+#: FAIL-CLOSED şəkildə `pro`-ya xəritələnir — hər iki köhnə plan da
+#: limitsiz şagird + limitsiz sınaq təqdim edirdi, yəni heç bir istifadəçi
+#: imtiyazını itirmir.
+LEGACY_PLAN_MAP: dict[str, str] = {
+    "pro_plus": PLAN_PRO,
+    "full_pro": PLAN_PRO,
+}
 
 #: FAIL-CLOSED sabitləri — DB-yə çıxış mümkün olmadıqda tətbiq olunur.
 #: ⚠️ Hər iki dəyər `None` DEYİL, çünki `None` = "limitsiz" deməkdir və
@@ -92,6 +104,22 @@ def _parse_ts(value: Any) -> Optional[datetime]:
 def _current_period_start() -> str:
     """Cari təqvim ayının 1-i (YYYY-MM-DD) — aylıq limit hesabının əsası."""
     return date(datetime.now(timezone.utc).year, datetime.now(timezone.utc).month, 1).isoformat()
+
+
+def normalize_plan_id(value: Any) -> str:
+    """DB-dən gələn plan dəyərini AKTİV katalog açarına çevirir.
+
+    Köhnə açarlar (`pro_plus`, `full_pro`) `pro`-ya xəritələnir; boş və ya
+    naməlum dəyərlər isə fail-closed olaraq `free`-yə düşür.
+    """
+    if not value:
+        return PLAN_FREE
+    raw = str(value).strip()
+    mapped = LEGACY_PLAN_MAP.get(raw, raw)
+    if mapped not in VALID_PLAN_IDS:
+        logger.warning("plans.unknown_plan_value value=%r → free", value)
+        return PLAN_FREE
+    return mapped
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +163,9 @@ def fetch_plans(db: Client, only_active: bool = True) -> list[dict[str, Any]]:
         except Exception:
             logger.exception("plans.fetch_plans failed (legacy columns)")
             return []
-    return [_public_plan(r) for r in rows]
+    # Arxivləşdirilmiş planlar (`pro_plus`, `full_pro`) katalogda HEÇ VAXT
+    # göstərilmir — `is_active = false` olanları da süzürük (defensive).
+    return [_public_plan(r) for r in rows if r.get("id") in VALID_PLAN_IDS]
 
 
 def _to_float(value: Any) -> Optional[float]:
@@ -227,8 +257,12 @@ def _public_plan(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def get_plan_by_id(db: Client, plan_id: str) -> Optional[dict[str, Any]]:
-    """Tək plan sətrini qaytarır (None tapılmasa)."""
-    if not plan_id or plan_id not in VALID_PLAN_IDS:
+    """Tək AKTİV plan sətrini qaytarır (None tapılmasa).
+
+    Köhnə açarlar avtomatik `pro`-ya xəritələnir (`normalize_plan_id`).
+    """
+    plan_id = normalize_plan_id(plan_id)
+    if plan_id not in VALID_PLAN_IDS:
         return None
     try:
         row = (
@@ -246,7 +280,7 @@ def get_plan_by_id(db: Client, plan_id: str) -> Optional[dict[str, Any]]:
     except Exception:
         logger.exception("plans.get_plan_by_id failed id=%s", plan_id)
         return None
-    return _public_plan(row[0]) if row else None
+    return _public_plan(row[0]) if row and row[0].get("id") in VALID_PLAN_IDS else None
 
 
 # ---------------------------------------------------------------------------
@@ -281,17 +315,16 @@ def get_effective_plan(db: Client, tutor_id: str) -> dict[str, Any]:
         logger.warning("plans.tutor_row_missing tutor_id=%s", tutor_id)
         return {**fallback, "expired": False, "plan_expires_at": None}
 
-    raw_plan = row[0].get("plan") or PLAN_FREE
+    raw_plan = row[0].get("plan")
     expires_at = row[0].get("plan_expires_at")
     expires_dt = _parse_ts(expires_at)
     now = datetime.now(timezone.utc)
 
     is_expired = bool(expires_dt and expires_dt < now)
 
-    # Təhlükəsizlik: naməlum plan ID-si → Free (fail-closed)
-    if raw_plan not in VALID_PLAN_IDS:
-        logger.warning("plans.unknown_plan_value tutor_id=%s plan=%r", tutor_id, raw_plan)
-        raw_plan = PLAN_FREE
+    # Təhlükəsizlik: naməlum/köhnə plan ID-si → aktiv katalog açarı
+    # (köhnə `pro_plus`/`full_pro` → `pro`; naməlum → `free`, fail-closed).
+    raw_plan = normalize_plan_id(raw_plan)
 
     if is_expired and raw_plan != PLAN_FREE:
         logger.info("plans.expired_downgraded tutor_id=%s plan=%s", tutor_id, raw_plan)
