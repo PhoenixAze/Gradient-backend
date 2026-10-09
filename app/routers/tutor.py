@@ -510,6 +510,18 @@ def _insert_tutor_request(req_obj: dict, db):
     req_id = req_obj["id"]
     _in_memory_requests[req_id] = req_obj
     try:
+        db_row = {
+            "id": req_id,
+            "student_id": req_obj["student_id"],
+            "tutor_id": req_obj["tutor_id"],
+            "status": req_obj.get("status", "pending"),
+            "created_at": req_obj.get("created_at") or datetime.now(timezone.utc).isoformat()
+        }
+        db.table("tutor_join_requests").insert(db_row).execute()
+        return
+    except Exception as e:
+        print(f"tutor_join_requests insert note: {e}")
+    try:
         db.table("tutor_requests").insert(req_obj).execute()
     except Exception as e:
         print(f"Supabase tutor_requests insert note (in-memory used): {e}")
@@ -517,19 +529,54 @@ def _insert_tutor_request(req_obj: dict, db):
 def _get_tutor_requests_for_tutor(tutor_id: str, db):
     items = []
     try:
-        res = db.table("tutor_requests").select("*").eq("tutor_id", tutor_id).eq("status", "pending").order("created_at", desc=True).execute()
+        res = db.table("tutor_join_requests").select("*").eq("tutor_id", tutor_id).eq("status", "pending").order("created_at", desc=True).execute()
         if res.data:
-            items = res.data
-    except Exception:
-        pass
+            student_ids = [r["student_id"] for r in res.data if r.get("student_id")]
+            students_map = {}
+            if student_ids:
+                try:
+                    users_res = db.table("users").select("id, first_name, last_name, identifier, grade").in_("id", student_ids).execute()
+                    students_map = {u["id"]: u for u in (users_res.data or [])}
+                except Exception:
+                    pass
+            for r in res.data:
+                st = students_map.get(r.get("student_id"), {})
+                st_name = f"{st.get('first_name', '')} {st.get('last_name', '')}".strip() or "Şagird"
+                items.append({
+                    "id": str(r["id"]),
+                    "student_id": r["student_id"],
+                    "student_name": st_name,
+                    "student_identifier": st.get("identifier", ""),
+                    "student_grade": st.get("grade", "Məlum deyil"),
+                    "tutor_id": tutor_id,
+                    "status": r.get("status", "pending"),
+                    "created_at": r.get("created_at")
+                })
+    except Exception as e:
+        print(f"tutor_join_requests fetch note: {e}")
 
-    seen_ids = {item["id"] for item in items}
+    if not items:
+        try:
+            res = db.table("tutor_requests").select("*").eq("tutor_id", tutor_id).eq("status", "pending").order("created_at", desc=True).execute()
+            if res.data:
+                items = res.data
+        except Exception:
+            pass
+
+    seen_ids = {str(item["id"]) for item in items}
     for item in _in_memory_requests.values():
-        if item.get("tutor_id") == tutor_id and item.get("status") == "pending" and item["id"] not in seen_ids:
+        if item.get("tutor_id") == tutor_id and item.get("status") == "pending" and str(item["id"]) not in seen_ids:
             items.append(item)
     return items
 
 def _get_pending_request_for_student(student_id: str, db):
+    try:
+        res = db.table("tutor_join_requests").select("*").eq("student_id", student_id).eq("status", "pending").order("created_at", desc=True).limit(1).execute()
+        if res.data:
+            return res.data[0]
+    except Exception:
+        pass
+
     try:
         res = db.table("tutor_requests").select("*").eq("student_id", student_id).eq("status", "pending").order("created_at", desc=True).limit(1).execute()
         if res.data:
@@ -544,6 +591,13 @@ def _get_pending_request_for_student(student_id: str, db):
 
 def _find_request_by_id(req_id: str, db):
     try:
+        res = db.table("tutor_join_requests").select("*").eq("id", req_id).execute()
+        if res.data:
+            return res.data[0]
+    except Exception:
+        pass
+
+    try:
         res = db.table("tutor_requests").select("*").eq("id", req_id).execute()
         if res.data:
             return res.data[0]
@@ -552,11 +606,16 @@ def _find_request_by_id(req_id: str, db):
     return _in_memory_requests.get(req_id)
 
 def _update_tutor_request_status(req_id: str, new_status: str, db):
+    now_iso = datetime.now(timezone.utc).isoformat()
     if req_id in _in_memory_requests:
         _in_memory_requests[req_id]["status"] = new_status
-        _in_memory_requests[req_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _in_memory_requests[req_id]["updated_at"] = now_iso
     try:
-        db.table("tutor_requests").update({"status": new_status, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", req_id).execute()
+        db.table("tutor_join_requests").update({"status": new_status, "resolved_at": now_iso}).eq("id", req_id).execute()
+    except Exception as e:
+        print(f"tutor_join_requests update note: {e}")
+    try:
+        db.table("tutor_requests").update({"status": new_status, "updated_at": now_iso}).eq("id", req_id).execute()
     except Exception as e:
         print(f"tutor_requests update note: {e}")
 
@@ -601,7 +660,7 @@ def create_student_join_request(payload: CreateTutorRequestPayload, current_user
     if existing_req and existing_req.get("tutor_id") == tutor["id"]:
         raise HTTPException(status_code=400, detail="Bu repetitora artıq göndərilmiş və gözləyən istəyiniz var.")
 
-    req_id = "req_" + str(uuid.uuid4()).replace("-", "")[:12]
+    req_id = str(uuid.uuid4())
     req_obj = {
         "id": req_id,
         "student_id": current_user["id"],
@@ -1472,12 +1531,12 @@ def submit_tutor_assignment_exam(
     incorrect_count = 0
     for q_idx in range(1, total_q + 1):
         q_key = str(q_idx)
-        correct_ans = str(answer_key.get(q_key, "")).strip().upper()
-        student_ans = str(user_answers.get(q_key, "")).strip().upper()
+        correct_ans = str(answer_key.get(q_key, "") or answer_key.get(q_idx, "")).strip().upper()
+        student_ans = str(user_answers.get(q_key, "") or user_answers.get(q_idx, "")).strip().upper()
         if student_ans:
-            if student_ans == correct_ans:
+            if correct_ans and student_ans == correct_ans:
                 correct_count += 1
-            else:
+            elif correct_ans:
                 incorrect_count += 1
     empty_count = max(0, total_q - (correct_count + incorrect_count))
     percentage = round((correct_count / total_q) * 100, 1) if total_q > 0 else 0
@@ -1567,8 +1626,8 @@ def ai_generate_answers_from_pdf(
                 answers = parsed.get("answers", parsed)
                 return {"success": True, "answers": answers}
     except Exception as e:
-        print(f"Gemini PDF analysis error: {e}")
+        logger.error("Gemini PDF analysis error: %s", e, exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Süni intellekt sınaq sənədini analiz edə bilmədi: {str(e)}"
+            detail="Süni intellekt sınaq sənədini analiz edə bilmədi. Zəhmət olmasa sənədin keyfiyyətini yoxlayıb yenidən cəhd edin."
         )

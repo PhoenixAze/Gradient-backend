@@ -12,6 +12,8 @@ app = FastAPI(
 )
 
 # Təhlükəsizlik Qeydi: Qəti CORS Siyasəti. Wildcard (*) qadağandır.
+import os
+
 ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -22,6 +24,13 @@ ALLOWED_ORIGINS = [
     "https://www.gradient.az",
     "https://phoenixaze.github.io"
 ]
+
+env_origins = os.getenv("ALLOWED_ORIGINS", "")
+if env_origins:
+    for o in env_origins.split(","):
+        o_clean = o.strip()
+        if o_clean and o_clean != "*" and o_clean not in ALLOWED_ORIGINS:
+            ALLOWED_ORIGINS.append(o_clean)
 
 app.add_middleware(
     CORSMiddleware,

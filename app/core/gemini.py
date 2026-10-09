@@ -59,6 +59,7 @@ _API_KEY_ENV_NAMES: Tuple[str, ...] = (
 _MODELS: Tuple[str, ...] = (
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
 )
 
 _API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models"

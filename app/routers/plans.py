@@ -99,7 +99,6 @@ def _fail(message: str, code: int = status.HTTP_400_BAD_REQUEST) -> HTTPExceptio
 @router.get("")
 @rate_limit("read")
 async def list_plans(
-    tutor: dict[str, Any] = Depends(require_tutor),
     db: Client = Depends(get_supabase_admin),
 ) -> dict[str, Any]:
     """Bütün aktiv planları qiymət sırası ilə qaytarır.

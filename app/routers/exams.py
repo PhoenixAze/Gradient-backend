@@ -79,7 +79,8 @@ def get_all_exams(current_user: dict = Depends(get_current_user)):
         "id, title, subject, price, question_count, duration_minutes, is_active, created_at"
     ).order("created_at", desc=True).execute()
 
-    exams = exams_res.data or []
+    raw_exams = exams_res.data or []
+    exams = [e for e in raw_exams if e.get("is_active") is not False]
 
     # Statistika mənbəyi = 1-ci cəhd (`exam_results`).
     results_res = db.table("exam_results").select(
@@ -220,12 +221,13 @@ def start_exam(exam_id: str, current_user: dict = Depends(get_current_user)):
     # (`explanation`) frontend-ə HEÇ VAXT göndərilmir. Sabit allow-list —
     # JSONB-dən gələn "əlavə" açar (məsən daxili metadata) sızdırılmır.
     safe_questions = []
-    for q in questions:
+    for idx, q in enumerate(questions):
         if not isinstance(q, dict):
             continue
         options = q.get("options")
+        q_id = q.get("q_id") if q.get("q_id") is not None else (idx + 1)
         safe_questions.append({
-            "q_id": q.get("q_id"),
+            "q_id": q_id,
             "text": q.get("text"),
             "options": options if isinstance(options, dict) else {},
         })
@@ -291,10 +293,10 @@ def submit_exam(exam_id: str, payload: ExamSubmitRequest, current_user: dict = D
         if not isinstance(q, dict):
             continue
 
-        q_id = str(q.get("q_id") if q.get("q_id") is not None else idx)
+        q_id = str(q.get("q_id") if q.get("q_id") is not None else (idx + 1))
         correct_ans = str(q.get("correct_answer") or "").strip().upper()
         q_tag = str(q.get("q_tag") or "").strip() or "Qeyd olunmayan mövzu"
-        chosen = user_answers.get(q_id, "")
+        chosen = user_answers.get(q_id, "") or user_answers.get(str(idx + 1), "") or user_answers.get(str(idx), "")
 
         if chosen and correct_ans and chosen == correct_ans:
             status_value = "correct"

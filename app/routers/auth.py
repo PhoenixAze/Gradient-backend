@@ -27,11 +27,28 @@ def register_user(user_data: UserRegisterRequest):
         tutor_id = None
         if user_data.role == "student" and user_data.tutor_code:
             code = user_data.tutor_code.strip()
-            t_res = db.table("users").select("id").eq("identifier", code).eq("role", "tutor").execute()
+            # 1. 4-rəqəmli sistem kodu ilə axtarış
+            t_res = db.table("users").select("id").eq("tutor_code", code).eq("role", "tutor").execute()
             if not t_res.data:
+                # 2. identifier (telefon və ya email) ilə axtarış
+                t_res = db.table("users").select("id").eq("identifier", code).eq("role", "tutor").execute()
+            if not t_res.data:
+                # 3. id ilə axtarış
                 t_res = db.table("users").select("id").eq("id", code).eq("role", "tutor").execute()
             if t_res.data:
                 tutor_id = t_res.data[0]["id"]
+
+        new_tutor_code = None
+        if user_data.role == "tutor":
+            try:
+                from app.core.tutor_code import _random_code, _code_taken
+                for _ in range(50):
+                    cand = _random_code()
+                    if not _code_taken(db, cand):
+                        new_tutor_code = cand
+                        break
+            except Exception as code_err:
+                print(f"tutor_code gen note: {code_err}")
 
         new_user = {
             "id": str(uuid.uuid4()),
@@ -43,7 +60,8 @@ def register_user(user_data: UserRegisterRequest):
             "grade": user_data.grade,
             "subject": user_data.subject,
             "balance": 0.00,
-            "tutor_id": tutor_id
+            "tutor_id": tutor_id,
+            "tutor_code": new_tutor_code
         }
         db.table("users").insert(new_user).execute()
         return {"message": "Qeydiyyat uğurla tamamlandı."}
@@ -115,9 +133,13 @@ def refresh_token(request: Request, response: Response):
     if not token:
         raise HTTPException(status_code=401, detail="Refresh token tapılmadı. Yenidən giriş edin.")
 
-    # "Bearer <token>" formatını təmizləyirik — zero-trust: format yoxlaması icra olunmadan decode edilmir
-    if token.lower().startswith("bearer "):
+    # "Bearer <token>" və ya URL-encoded formatları təmizləyirik
+    if token.startswith("Bearer%20"):
+        token = token[9:].strip()
+    elif token.lower().startswith("bearer "):
         token = token[7:].strip()
+    elif " " in token:
+        token = token.split(" ")[-1].strip()
     if not token:
         raise HTTPException(status_code=401, detail="Refresh token formatı keçərsizdir. Yenidən giriş edin.")
 

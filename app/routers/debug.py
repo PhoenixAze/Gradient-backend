@@ -487,7 +487,14 @@ async def create_exam(payload: ExamUpsertRequest, request: Request, api_key: str
             "duration_minutes": payload.duration_minutes,
             "is_active": payload.is_active,
         }
-        db.table("exams").insert(data).execute()
+        try:
+            db.table("exams").insert(data).execute()
+        except Exception as insert_err:
+            logger.warning("create_exam: retry without is_active column: %s", insert_err)
+            del data["is_active"]
+            db.table("exams").insert(data).execute()
+            data["is_active"] = True
+
         logger.info("exam_created exam_id=%s questions=%d", exam_id, len(payload.questions))
         return {"message": "Sınaq uğurla yaradıldı.", "exam": data}
     except Exception:
@@ -522,7 +529,14 @@ async def update_exam(
             "duration_minutes": payload.duration_minutes,
             "is_active": payload.is_active,
         }
-        db.table("exams").update(data).eq("id", exam_id).execute()
+        try:
+            db.table("exams").update(data).eq("id", exam_id).execute()
+        except Exception as update_err:
+            logger.warning("update_exam: retry without is_active column: %s", update_err)
+            del data["is_active"]
+            db.table("exams").update(data).eq("id", exam_id).execute()
+            data["is_active"] = True
+
         logger.info("exam_updated exam_id=%s", exam_id)
         return {"message": "Sınaq uğurla yeniləndi.", "exam": {"id": exam_id, **data}}
     except HTTPException:
