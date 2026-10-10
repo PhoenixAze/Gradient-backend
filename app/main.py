@@ -22,7 +22,8 @@ ALLOWED_ORIGINS = [
     "http://localhost:8158",
     "https://gradient.az",
     "https://www.gradient.az",
-    "https://phoenixaze.github.io"
+    "https://phoenixaze.github.io",
+    "https://gradient-quantix15.vercel.app"
 ]
 
 env_origins = os.getenv("ALLOWED_ORIGINS", "")
