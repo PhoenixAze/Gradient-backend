@@ -23,7 +23,7 @@ ALLOWED_ORIGINS = [
     "https://gradient.az",
     "https://www.gradient.az",
     "https://phoenixaze.github.io",
-    "https://gradient-quantix15.vercel.app"
+    "https://gradient-aze.vercel.app"
 ]
 
 env_origins = os.getenv("ALLOWED_ORIGINS", "")
