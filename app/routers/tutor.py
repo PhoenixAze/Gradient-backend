@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from app.core.plans import PlanLimitError, enforce_exam_limit, increment_exam_usage
+from app.core.plans import PlanLimitError, enforce_exam_limit, enforce_student_limit, increment_exam_usage
 from app.core.tutor_code import get_or_create_tutor_code
 from app.database import get_db
 from app.security import get_current_user, get_password_hash, verify_password
@@ -392,6 +392,21 @@ def add_student_to_group(payload: AddStudentPayload, current_user: dict = Depend
     if student.get("tutor_id") == tutor_id:
         raise HTTPException(status_code=400, detail="Bu şagird artıq sizin qrupunuzdadır.")
 
+    try:
+        enforce_student_limit(db, tutor_id)
+    except PlanLimitError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail={
+                "code": exc.code,
+                "message": exc.message,
+                "limit": exc.limit,
+                "used": exc.used,
+                "upgrade_suggested": True,
+                "upgrade_url": "plans.html",
+            },
+        )
+
     # Əgər istifadəçinin rolu bazada qeyd edilməyibsə və ya repetitor deyilsə, onu student kimi təsdiqləyirik
     db.table("users").update({"tutor_id": tutor_id}).eq("id", student["id"]).execute()
 
@@ -697,6 +712,21 @@ def accept_tutor_request(request_id: str, current_user: dict = Depends(get_curre
         raise HTTPException(status_code=403, detail="Bu istəyi idarə etmək səlahiyyətiniz yoxdur.")
 
     student_id = req.get("student_id")
+    try:
+        enforce_student_limit(db, tutor_id)
+    except PlanLimitError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail={
+                "code": exc.code,
+                "message": exc.message,
+                "limit": exc.limit,
+                "used": exc.used,
+                "upgrade_suggested": True,
+                "upgrade_url": "plans.html",
+            },
+        )
+
     # Şagirdin tutor_id-sini təyin edirik
     db.table("users").update({"tutor_id": tutor_id}).eq("id", student_id).execute()
     _update_tutor_request_status(request_id, "accepted", db)

@@ -63,7 +63,7 @@ CONTACT_HINT_RE = re.compile(r"^[0-9a-zA-Z+()\s@._-]{0,160}$")
 class UpgradeRequestIn(BaseModel):
     """Yüksəltmə sorğusunun gövdəsi."""
 
-    desired_plan: Literal["standard", "pro"]
+    desired_plan: Literal["standard", "pro", "courses", "kurslar"]
     contact_hint: Optional[str] = Field(default=None, max_length=CONTACT_HINT_MAX)
 
     @field_validator("contact_hint")
@@ -197,16 +197,16 @@ async def create_upgrade_request(
         raise _fail("Plan məlumatınız yüklənmədi", status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     current_plan = current.get("id") or "free"
+    desired = "courses" if payload.desired_plan == "kurslar" else payload.desired_plan
 
     # Yalnız yüksəltmə icazəlidir (downgrade = admin işidir)
-    if not is_upgrade(payload.desired_plan, current_plan):
+    if not is_upgrade(desired, current_plan):
         raise _fail(
             "Bu plan artıq mövcuddur və ya daha aşağıdır. Plan dəyişikliyi "
             "admin tərəfdən həyata keçirilir.",
             status.HTTP_400_BAD_REQUEST,
         )
 
-    desired = payload.desired_plan
     if desired not in VALID_PLAN_IDS:  # defense-in-depth (Literal onsuz da yoxlayır)
         raise _fail("Naməlum plan seçildi", status.HTTP_400_BAD_REQUEST)
 

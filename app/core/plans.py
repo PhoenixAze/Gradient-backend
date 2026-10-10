@@ -43,31 +43,33 @@ logger = logging.getLogger("gradient.plans")
 PLAN_FREE = "free"
 PLAN_STANDARD = "standard"
 PLAN_PRO = "pro"
+PLAN_COURSES = "courses"
 
 #: Plan yüksəltmə İSTİSMİYATI — yalnız yuxarıya hərəkət icazəlidir.
 #: İstifadəçi öz planını "downgrade" edə bilməz (bu, admin işidir).
 #:
-#: ⚠️ Katalog artıq SADƏCƏ 3 plandan ibarətdir: free | standard | pro.
-#:    `standard` = 20 şagirdə qədər + ayda 15 sınaq.
-#:    `pro`      = limitsiz şagird + LIMITSİZ sınaq.
+#: Katalog aktiv planları: free | standard | pro | courses.
+#:    `standard` = 20 şagirdə qədər + ayda 15 sınaq (14.99 AZN).
+#:    `pro`      = 80 şagirdə qədər + LIMITSİZ sınaq (29.99 AZN).
+#:    `courses`  = limitsiz şagird + LIMITSİZ sınaq (49.99 AZN).
 PLAN_RANK: dict[str, int] = {
     PLAN_FREE: 0,
     PLAN_STANDARD: 1,
     PLAN_PRO: 2,
+    PLAN_COURSES: 3,
 }
 
 VALID_PLAN_IDS = frozenset(PLAN_RANK.keys())
 
-#: KÖHNƏ plan açarları (miqrasiya #20261006000000-dən əvvəl aktiv idi).
+#: KÖHNƏ və ya alternativ plan açarları.
 #:
 #: DB-də hələ köhnə dəyər qalan sətirlər olsa (miqrasiya tam icra edilməmişsə
 #: və ya `is_active=false` olan arxiv sətirləri), səhifə sınmasın deyə
-#: FAIL-CLOSED şəkildə `pro`-ya xəritələnir — hər iki köhnə plan da
-#: limitsiz şagird + limitsiz sınaq təqdim edirdi, yəni heç bir istifadəçi
-#: imtiyazını itirmir.
+#: FAIL-CLOSED şəkildə xəritələnir.
 LEGACY_PLAN_MAP: dict[str, str] = {
     "pro_plus": PLAN_PRO,
     "full_pro": PLAN_PRO,
+    "kurslar": PLAN_COURSES,
 }
 
 #: FAIL-CLOSED sabitləri — DB-yə çıxış mümkün olmadıqda tətbiq olunur.
